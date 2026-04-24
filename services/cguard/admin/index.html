@@ -1,0 +1,575 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>C-Guard Admin Investigation</title>
+    <link rel="stylesheet" href="/admin/styles.css" />
+  </head>
+  <body>
+    <div class="bg-shape bg-shape-a"></div>
+    <div class="bg-shape bg-shape-b"></div>
+    <header class="topbar">
+      <div class="brand">
+        <h1>C-Guard Admin</h1>
+        <p>Investigation Dashboard</p>
+      </div>
+      <form id="adminAuthForm" class="auth-form">
+        <label>
+          Username
+          <input id="adminUsernameInput" type="text" value="admin-reviewer" required />
+        </label>
+        <label>
+          Password
+          <input id="adminPasswordInput" type="password" value="admin-reviewer" required />
+        </label>
+        <label>
+          Admin Key
+          <input id="adminKeyInput" type="password" placeholder="optional" />
+        </label>
+        <button type="submit">Login</button>
+      </form>
+      <div id="adminAuthStatus" class="auth-status">Not authenticated</div>
+    </header>
+
+    <main class="layout">
+      <aside class="panel sessions-panel">
+        <div class="panel-head">
+          <h2>Sessions</h2>
+          <div class="row">
+            <select id="sessionStatusFilter">
+              <option value="">All</option>
+              <option value="ACTIVE">ACTIVE</option>
+              <option value="WARN">WARN</option>
+              <option value="BLOCKED">BLOCKED</option>
+              <option value="OFFLINE">OFFLINE</option>
+            </select>
+            <select id="sessionUploadStatusFilter">
+              <option value="">Upload: All</option>
+              <option value="ok">Upload: ok</option>
+              <option value="recovered">Upload: recovered</option>
+              <option value="degraded">Upload: degraded</option>
+              <option value="failed">Upload: failed</option>
+            </select>
+            <button id="sessionUploadRecoveredOnlyBtn" class="session-filter-btn" type="button">
+              Upload Recovered (<span id="sessionUploadRecoveredCount">0</span>)
+            </button>
+            <button id="sessionUploadDegradedOnlyBtn" class="session-filter-btn" type="button">
+              Upload Degraded (<span id="sessionUploadDegradedCount">0</span>)
+            </button>
+            <button id="sessionUploadFailedOnlyBtn" class="session-filter-btn" type="button">
+              Upload Failed (<span id="sessionUploadFailedCount">0</span>)
+            </button>
+            <button id="sessionUploadFilterClearBtn" class="session-filter-btn" type="button">
+              Upload Clear
+            </button>
+            <label class="inline-toggle">
+              <input id="sessionKernelPolicyOnly" type="checkbox" />
+              Kernel policy only
+            </label>
+            <button id="sessionKernelWarnOnlyBtn" class="session-filter-btn" type="button">
+              Kernel Warn (<span id="sessionKernelWarnCount">0</span>)
+            </button>
+            <button id="sessionKernelBlockOnlyBtn" class="session-filter-btn" type="button">
+              Kernel Block (<span id="sessionKernelBlockCount">0</span>)
+            </button>
+            <button id="sessionParticipantGateOnlyBtn" class="session-filter-btn" type="button">
+              Gate Violations (<span id="sessionParticipantGateCount">0</span>)
+            </button>
+            <button id="sessionKernelFilterClearBtn" class="session-filter-btn" type="button">
+              Kernel Clear
+            </button>
+            <input id="sessionLimitInput" type="number" min="1" value="20" />
+            <button id="reloadSessionsBtn" type="button">Reload</button>
+          </div>
+        </div>
+        <div class="row">
+          <button id="sessionPrevBtn" type="button">Prev</button>
+          <button id="sessionNextBtn" type="button">Next</button>
+          <span id="sessionPageInfo" class="meta">offset=0</span>
+        </div>
+        <div id="sessionFilterState" class="state-tags"></div>
+        <div id="sessionOperatorAlertBadges" class="state-tags">
+          <span id="sessionGateAlertBadge" class="state-tag ok">gate_violations:0</span>
+          <span id="sessionKernelBlockAlertBadge" class="state-tag ok">kernel_blocks:0</span>
+          <span id="sessionUploadFailedAlertBadge" class="state-tag ok">upload_failed:0</span>
+        </div>
+        <div id="operatorToastHost" class="operator-toast-host" aria-live="polite"></div>
+        <section class="card metrics-card">
+          <h3>Gate Failure Counters</h3>
+          <div class="row metrics-controls">
+            <button id="reloadGateFailureCountersBtn" type="button">Reload Gate Counters</button>
+          </div>
+          <div id="gateFailureCountersState" class="state">Login required.</div>
+          <div id="gateFailureCountersTags" class="state-tags"></div>
+        </section>
+        <section class="card metrics-card">
+          <h3>Runtime Policy Controls (Classic)</h3>
+          <div id="runtimePolicyControlState" class="state">Login required.</div>
+          <div class="row metrics-controls">
+            <label class="inline-toggle">
+              <input id="policyRequireDiscordLinkedToggle" type="checkbox" />
+              require_discord_linked
+            </label>
+            <label>
+              require_discord_linked_action
+              <select id="policyRequireDiscordLinkedActionSelect">
+                <option value="warn">warn</option>
+                <option value="restricted">restricted</option>
+                <option value="blocked">blocked</option>
+              </select>
+            </label>
+            <label>
+              require_discord_linked_grace_sec
+              <input id="policyRequireDiscordLinkedGraceSecInput" type="number" min="0" value="0" />
+            </label>
+            <label>
+              cli_detection_action
+              <select id="policyCliDetectionActionSelect">
+                <option value="off">off</option>
+                <option value="warn">warn</option>
+                <option value="restricted">restricted</option>
+                <option value="blocked">blocked</option>
+              </select>
+            </label>
+            <label>
+              cli_confidence_threshold
+              <input id="policyCliConfidenceThresholdInput" type="number" min="0" max="100" value="85" />
+            </label>
+            <label>
+              cli_min_evidence_count
+              <input id="policyCliMinEvidenceCountInput" type="number" min="1" value="1" />
+            </label>
+            <label>
+              cli_enforcement_cooldown_sec
+              <input id="policyCliEnforcementCooldownSecInput" type="number" min="0" value="0" />
+            </label>
+            <label>
+              cli_override_window_sec
+              <input id="policyCliOverrideWindowSecInput" type="number" min="0" value="0" />
+            </label>
+          </div>
+          <label class="inline-toggle">
+            <input id="runtimePolicyHighImpactConfirmCheckbox" type="checkbox" />
+            high_impact_confirmed (required for sensitive changes)
+          </label>
+          <label>
+            Update Reason (required)
+            <input
+              id="runtimePolicyUpdateReasonInput"
+              type="text"
+              minlength="12"
+              placeholder="Explain why this high-impact policy change is needed."
+            />
+          </label>
+          <div class="row metrics-controls">
+            <button id="saveRuntimePolicyBtn" type="button">Apply Runtime Policy</button>
+            <button id="reloadRuntimePolicyBtn" type="button">Reload Runtime Policy</button>
+          </div>
+        </section>
+        <section class="card metrics-card">
+          <h3>Detection Quality (Review-Labeled)</h3>
+          <div id="qualityMetricsState" class="state">Login required.</div>
+          <div id="qualityMetricsSummary" class="state-tags"></div>
+          <div class="row metrics-controls">
+            <label>
+              From
+              <input id="qualityTimeseriesFromInput" type="datetime-local" />
+            </label>
+            <label>
+              To
+              <input id="qualityTimeseriesToInput" type="datetime-local" />
+            </label>
+            <label>
+              Buckets
+              <input id="qualityTimeseriesBucketsInput" type="number" min="1" max="365" value="30" />
+            </label>
+            <button id="reloadQualityTimeseriesBtn" type="button">Load Trend</button>
+          </div>
+          <div id="qualityTimeseriesState" class="state">Select range and load trend.</div>
+          <div class="table-wrap">
+            <table class="timeline-table quality-timeseries-table">
+              <thead>
+                <tr>
+                  <th>Day</th>
+                  <th>Reviewed</th>
+                  <th>Precision</th>
+                  <th>Recall</th>
+                  <th>FPR</th>
+                  <th>FNR</th>
+                  <th>Kernel Warn</th>
+                </tr>
+              </thead>
+              <tbody id="qualityTimeseriesBody"></tbody>
+            </table>
+          </div>
+          <div id="qualityTimeseriesEmpty" class="state hidden">No timeseries buckets available.</div>
+          <div id="qualityTimeseriesDetailState" class="state">
+            Select a day row to inspect failed-rule details.
+          </div>
+          <div id="qualityTimeseriesDetailTags" class="state-tags"></div>
+          <ul id="qualityTimeseriesDetailRules" class="audit-list"></ul>
+        </section>
+        <div id="sessionsState" class="state">Loading sessions...</div>
+        <ul id="sessionsList" class="sessions-list"></ul>
+      </aside>
+
+      <section class="panel investigation-panel">
+        <div class="panel-head">
+          <h2>Operations</h2>
+          <div class="tab-row">
+            <button id="tabInvestigationBtn" class="tab-btn active" type="button">Investigation</button>
+            <button id="tabBansBtn" class="tab-btn" type="button">Bans</button>
+            <button id="tabAuditBtn" class="tab-btn" type="button">Audit</button>
+          </div>
+        </div>
+
+        <div id="viewLoading" class="state">Select a session to load investigation data.</div>
+        <div id="viewError" class="state error hidden"></div>
+
+        <div id="viewContent" class="hidden tab-panel active">
+          <section class="card">
+            <h3>Investigation States</h3>
+            <div id="investigationStates" class="state-tags"></div>
+            <div id="runtimePolicyState" class="state-tags"></div>
+          </section>
+
+          <section class="card">
+            <div class="row">
+              <label>
+                Severity
+                <select id="severityFilter">
+                  <option value="">All</option>
+                  <option value="low">low</option>
+                  <option value="medium">medium</option>
+                  <option value="high">high</option>
+                  <option value="critical">critical</option>
+                </select>
+              </label>
+              <label>
+                Event Type
+                <input id="eventTypeFilter" type="text" placeholder="e.g. DEBUGGER_DETECTED" />
+              </label>
+              <label class="inline-toggle">
+                <input id="collapseNoisyFilter" type="checkbox" />
+                Collapse noisy events
+              </label>
+              <label class="inline-toggle">
+                <input id="validationWarnOnlyFilter" type="checkbox" />
+                Validation warn only
+              </label>
+              <label class="inline-toggle">
+                <input id="llmDomainOnlyFilter" type="checkbox" />
+                LLM domain only
+              </label>
+              <label>
+                Failed Rule
+                <select id="validationRuleFilter">
+                  <option value="">All</option>
+                  <option value="replay_pattern">replay_pattern</option>
+                  <option value="bridge_counter_monotonic">bridge_counter_monotonic</option>
+                  <option value="bridge_counter_gap">bridge_counter_gap</option>
+                  <option value="bridge_nonce_presence">bridge_nonce_presence</option>
+                  <option value="bridge_nonce_reuse">bridge_nonce_reuse</option>
+                  <option value="bridge_nonce_counter_consistency">bridge_nonce_counter_consistency</option>
+                  <option value="bridge_emitted_at_monotonic">bridge_emitted_at_monotonic</option>
+                  <option value="bridge_emitted_at_freshness">bridge_emitted_at_freshness</option>
+                  <option value="bridge_staleness">bridge_staleness</option>
+                  <option value="bridge_signature_verification">bridge_signature_verification</option>
+                  <option value="bridge_session_binding_verification">bridge_session_binding_verification</option>
+                  <option value="kernel_signal_burst">kernel_signal_burst</option>
+                  <option value="session_binding">session_binding</option>
+                  <option value="source_presence">source_presence</option>
+                  <option value="source_expected_kernel_bridge">source_expected_kernel_bridge</option>
+                </select>
+              </label>
+              <label class="inline-toggle">
+                <input id="autoApplyFiltersToggle" type="checkbox" checked />
+                Auto apply
+              </label>
+              <button id="applyFiltersBtn" type="button">Filter</button>
+            </div>
+            <div class="row">
+              <button id="presetValidationWarnBtn" class="preset-btn" type="button">Preset: Validation Warn</button>
+              <button id="presetNonceReuseBtn" class="preset-btn" type="button">Preset: Nonce Reuse</button>
+              <button id="presetFreshnessBtn" class="preset-btn" type="button">Preset: Freshness Gap</button>
+              <button id="presetLlmDomainBtn" class="preset-btn" type="button">Preset: LLM Domain</button>
+              <button id="presetClearBtn" class="preset-btn" type="button">Preset: Clear</button>
+            </div>
+          </section>
+
+          <section class="card">
+            <h3>Session Summary</h3>
+            <dl id="sessionSummary" class="summary-grid"></dl>
+          </section>
+
+          <section class="card">
+            <h3>Risk Overview</h3>
+            <div id="riskOverview" class="risk-overview"></div>
+          </section>
+
+          <section class="card">
+            <h3>Event Timeline</h3>
+            <div class="table-wrap">
+              <table class="timeline-table">
+                <thead>
+                  <tr>
+                    <th>Time</th>
+                    <th>Type</th>
+                    <th>Severity</th>
+                    <th>Score Delta</th>
+                    <th>Description</th>
+                  </tr>
+                </thead>
+                <tbody id="timelineBody"></tbody>
+              </table>
+            </div>
+            <div id="timelineEmpty" class="state hidden">No events in this view.</div>
+          </section>
+
+          <section class="card dual">
+            <div>
+              <h3>Evidence Detail</h3>
+              <div id="evidenceMeta" class="meta"></div>
+              <h4>Raw Evidence</h4>
+              <pre id="evidenceRaw" class="evidence-box"></pre>
+              <h4>Parsed Fields</h4>
+              <ul id="evidenceParsed" class="parsed-list"></ul>
+            </div>
+            <div>
+              <h3>Reviewer Notes</h3>
+              <div class="row">
+                <label>
+                  Author
+                  <input id="notesAuthorFilter" type="text" placeholder="e.g. admin-reviewer" />
+                </label>
+                <label>
+                  Related Event Type
+                  <input
+                    id="notesRelatedEventTypeFilter"
+                    type="text"
+                    placeholder="e.g. DEBUGGER_DETECTED"
+                  />
+                </label>
+                <button id="notesUseSelectedEventTypeBtn" type="button">Use Selected Event Type</button>
+                <label>
+                  Related Severity
+                  <select id="notesRelatedSeverityFilter">
+                    <option value="">All</option>
+                    <option value="low">low</option>
+                    <option value="medium">medium</option>
+                    <option value="high">high</option>
+                    <option value="critical">critical</option>
+                  </select>
+                </label>
+                <button id="notesUseSelectedSeverityBtn" type="button">Use Selected Severity</button>
+                <label>
+                  From
+                  <input id="notesFromInput" type="datetime-local" />
+                </label>
+                <label>
+                  To
+                  <input id="notesToInput" type="datetime-local" />
+                </label>
+                <label>
+                  Limit
+                  <input id="notesLimitInput" type="number" min="1" value="20" />
+                </label>
+                <button id="reloadNotesBtn" type="button">Reload Notes</button>
+              </div>
+              <div class="row">
+                <button id="notesPrevBtn" type="button">Prev</button>
+                <button id="notesNextBtn" type="button">Next</button>
+                <span id="notesPageInfo" class="meta">offset=0</span>
+              </div>
+              <div id="notesState" class="state">Select a session to load notes.</div>
+              <ul id="notesList" class="audit-list"></ul>
+              <form id="noteForm">
+                <textarea id="noteText" rows="4" placeholder="Add investigation note"></textarea>
+                <button type="submit">Add Note</button>
+              </form>
+
+              <h3>Manual Decision Actions</h3>
+              <div id="actionGuardrailCopy" class="state warn">
+                Sensitive actions (`mark_as_suspicious`, `escalate`, `clear_with_reason`) are
+                audited. Provide concrete evidence-based reason text before submission.
+              </div>
+              <div class="row">
+                <label>
+                  Actor
+                  <input id="actionsActorFilter" type="text" placeholder="e.g. admin-reviewer" />
+                </label>
+                <label>
+                  Action
+                  <input id="actionsTypeFilter" type="text" placeholder="e.g. escalate" />
+                </label>
+                <label>
+                  Related Event Type
+                  <input
+                    id="actionsRelatedEventTypeFilter"
+                    type="text"
+                    placeholder="e.g. DEBUGGER_DETECTED"
+                  />
+                </label>
+                <button id="actionsUseSelectedEventTypeBtn" type="button">Use Selected Event Type</button>
+                <label>
+                  Related Severity
+                  <select id="actionsRelatedSeverityFilter">
+                    <option value="">All</option>
+                    <option value="low">low</option>
+                    <option value="medium">medium</option>
+                    <option value="high">high</option>
+                    <option value="critical">critical</option>
+                  </select>
+                </label>
+                <button id="actionsUseSelectedSeverityBtn" type="button">Use Selected Severity</button>
+                <label>
+                  From
+                  <input id="actionsFromInput" type="datetime-local" />
+                </label>
+                <label>
+                  To
+                  <input id="actionsToInput" type="datetime-local" />
+                </label>
+                <label>
+                  Limit
+                  <input id="actionsLimitInput" type="number" min="1" value="20" />
+                </label>
+                <button id="reloadActionsBtn" type="button">Reload Actions</button>
+              </div>
+              <div class="row">
+                <button id="actionsPrevBtn" type="button">Prev</button>
+                <button id="actionsNextBtn" type="button">Next</button>
+                <span id="actionsPageInfo" class="meta">offset=0</span>
+              </div>
+              <div id="actionsState" class="state">Select a session to load actions.</div>
+              <ul id="actionsList" class="audit-list"></ul>
+              <form id="actionForm">
+                <label>
+                  Action
+                  <select id="actionType">
+                    <option value="mark_as_reviewed">mark_as_reviewed</option>
+                    <option value="mark_as_suspicious">mark_as_suspicious</option>
+                    <option value="escalate">escalate</option>
+                    <option value="clear_with_reason">clear_with_reason</option>
+                    <option value="request_follow_up">request_follow_up</option>
+                    <option value="request_follow_up_kernel">request_follow_up_kernel</option>
+                  </select>
+                </label>
+                <button id="quickMarkReviewedBtn" type="button">Quick: Mark Reviewed</button>
+                <button id="quickRequestFollowUpBtn" type="button">Quick: Request Follow-up</button>
+                <button id="quickReasonTemplateActionBtn" type="button">
+                  Quick: Reason Template
+                </button>
+                <textarea id="actionReason" rows="3" placeholder="Reason"></textarea>
+                <button type="submit">Record Action</button>
+              </form>
+            </div>
+          </section>
+        </div>
+
+        <div id="bansPanel" class="hidden tab-panel">
+          <section class="card">
+            <h3>Ban Management</h3>
+            <form id="banForm">
+              <div class="row">
+                <label>
+                  Scope
+                  <select id="banScope">
+                    <option value="user">user</option>
+                    <option value="session">session</option>
+                    <option value="team">team</option>
+                  </select>
+                </label>
+                <label class="grow">
+                  Target ID
+                  <input id="banTargetId" type="text" placeholder="user_id / session_id / team_id" />
+                </label>
+                <label>
+                  Duration(sec)
+                  <input id="banDurationSec" type="number" min="0" value="600" />
+                </label>
+              </div>
+              <label>
+                Reason
+                <textarea id="banReason" rows="3" placeholder="Reason for enforcement"></textarea>
+              </label>
+              <button type="submit">Create Ban</button>
+            </form>
+          </section>
+
+          <section class="card">
+            <div class="row">
+              <label>
+                Status
+                <select id="banStatusFilter">
+                  <option value="">All</option>
+                  <option value="ACTIVE">ACTIVE</option>
+                  <option value="REVOKED">REVOKED</option>
+                </select>
+              </label>
+              <label>
+                Scope
+                <select id="banScopeFilter">
+                  <option value="">All</option>
+                  <option value="user">user</option>
+                  <option value="session">session</option>
+                  <option value="team">team</option>
+                </select>
+              </label>
+              <label>
+                Limit
+                <input id="banLimitInput" type="number" min="1" value="20" />
+              </label>
+              <button id="reloadBansBtn" type="button">Reload Bans</button>
+            </div>
+            <div class="row">
+              <button id="banPrevBtn" type="button">Prev</button>
+              <button id="banNextBtn" type="button">Next</button>
+              <span id="banPageInfo" class="meta">offset=0</span>
+            </div>
+            <div id="bansState" class="state">Login required.</div>
+            <ul id="bansList" class="audit-list"></ul>
+          </section>
+        </div>
+
+        <div id="auditPanel" class="hidden tab-panel">
+          <section class="card">
+            <div class="row">
+              <label>
+                Action
+                <input id="auditActionFilter" type="text" placeholder="e.g. BAN_CREATE" />
+              </label>
+              <label>
+                Actor
+                <input id="auditActorFilter" type="text" placeholder="e.g. admin-enforcer" />
+              </label>
+              <label>
+                From
+                <input id="auditFromInput" type="datetime-local" />
+              </label>
+              <label>
+                To
+                <input id="auditToInput" type="datetime-local" />
+              </label>
+              <label>
+                Limit
+                <input id="auditLimitInput" type="number" min="1" value="20" />
+              </label>
+              <button id="reloadAuditBtn" type="button">Reload Audit</button>
+            </div>
+            <div class="row">
+              <button id="auditPrevBtn" type="button">Prev</button>
+              <button id="auditNextBtn" type="button">Next</button>
+              <span id="auditPageInfo" class="meta">offset=0</span>
+            </div>
+            <div id="auditState" class="state">Login required.</div>
+            <ul id="auditList" class="audit-list"></ul>
+          </section>
+        </div>
+      </section>
+    </main>
+
+    <script src="/admin/app.js"></script>
+  </body>
+</html>

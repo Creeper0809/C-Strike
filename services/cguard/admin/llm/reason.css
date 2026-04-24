@@ -1,0 +1,137 @@
+:root {
+  --bg: #0b1220;
+  --panel: #111a2b;
+  --panel-2: #152136;
+  --text: #e8eefc;
+  --muted: #9db0d1;
+  --line: #25334f;
+  --warn: #d89b2b;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: "Segoe UI", "Noto Sans KR", sans-serif;
+  background: radial-gradient(1200px 600px at 10% -20%, #1d2d4d 0%, var(--bg) 50%);
+  color: var(--text);
+}
+
+.topbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-end;
+  gap: 12px;
+  border-bottom: 1px solid var(--line);
+  padding: 16px 18px;
+}
+
+.topbar h1 {
+  margin: 0 0 4px;
+}
+
+.topbar p {
+  margin: 0;
+  color: var(--muted);
+}
+
+.secondary-link {
+  color: var(--muted);
+  text-decoration: none;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: #0f1729;
+}
+
+.layout {
+  padding: 16px 18px;
+  display: grid;
+  gap: 12px;
+}
+
+.card {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 14px;
+}
+
+.auth-form {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.auth-form input,
+.auth-form button {
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel-2);
+  color: var(--text);
+}
+
+.auth-form button {
+  cursor: pointer;
+  background: #1f3152;
+}
+
+.state {
+  margin-top: 10px;
+  color: var(--muted);
+}
+
+.summary-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 8px;
+}
+
+.summary-item {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: #0f1729;
+}
+
+.summary-item .label {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.summary-item .value {
+  display: block;
+  margin-top: 4px;
+  word-break: break-word;
+}
+
+.reason-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.reason-table th,
+.reason-table td {
+  border-bottom: 1px solid var(--line);
+  text-align: left;
+  vertical-align: top;
+  padding: 9px 7px;
+}
+
+.reason-table th {
+  color: var(--muted);
+}
+
+.reason-table tr.hit {
+  background: color-mix(in srgb, var(--warn) 14%, transparent);
+}
+
+.empty {
+  text-align: center;
+  color: var(--muted);
+  padding: 12px 6px;
+}

@@ -1,0 +1,303 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: cstrike-postgres
+    environment:
+      TZ: Asia/Seoul
+      POSTGRES_DB: ops_db
+      POSTGRES_USER: ops_svc
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ops_password}
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./db/init:/docker-entrypoint-initdb.d
+    networks:
+      - cstrike-ops-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ops_svc -d ops_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: cstrike-redis
+    environment:
+      TZ: Asia/Seoul
+    command: redis-server --requirepass ${REDIS_PASSWORD:-redis_password}
+    ports:
+      - "127.0.0.1:6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - cstrike-ops-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-redis_password}", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  ops-backend:
+    build:
+      context: ../services/ops
+      dockerfile: Dockerfile
+    container_name: cstrike-ops-backend
+    env_file:
+      - ../.env
+    environment:
+      TZ: Asia/Seoul
+      DATABASE_URL: postgresql+asyncpg://ops_svc:${POSTGRES_PASSWORD:-ops_password}@postgres:5432/ops_db
+      REDIS_URL: redis://:${REDIS_PASSWORD:-redis_password}@redis:6379/0
+      DEPLOY_SERVICE_URL: http://deploy-service:8450
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY:-cstrike-internal-2026}
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-cstrike}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-cstrike_secret}
+      MINIO_BUCKET: cstrike-builds
+      CGUARD_SERVER_URL: http://cguard-server:8500
+      CGUARD_INTEGRATION_TOKEN: ${CGUARD_INTEGRATION_TOKEN:-cguard-integration-token-change-me}
+    expose:
+      - "8400"
+    networks:
+      - cstrike-ops-network
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      # cguard-server 의존성 제거 — C-Guard 전체 코드 수령 전까지 선택적 기동
+    restart: unless-stopped
+
+  ops-frontend:
+    build:
+      context: ../frontend
+      dockerfile: Dockerfile
+    container_name: cstrike-ops-frontend
+    environment:
+      TZ: Asia/Seoul
+      NEXT_PUBLIC_API_URL: http://ops-backend:8400
+    expose:
+      - "3000"
+    networks:
+      - cstrike-ops-network
+    depends_on:
+      - ops-backend
+    restart: unless-stopped
+
+  scoreboard:
+    build:
+      context: ../services/scoreboard
+      dockerfile: Dockerfile
+    container_name: cstrike-scoreboard
+    environment:
+      TZ: Asia/Seoul
+      # 내부 네트워크에서 ops-backend를 직접 호출 (nginx/자가서명 SSL 우회)
+      OPS_API_BASE: http://ops-backend:8400/api/v1/scoreboard
+      # 빈 값이면 부팅 시 /active-competitions로 자동 감지. 고정하려면 .env의 SCOREBOARD_COMPETITION_ID.
+      COMPETITION_ID: ${SCOREBOARD_COMPETITION_ID:-}
+      SCOREBOARD_POLL_INTERVAL: ${SCOREBOARD_POLL_INTERVAL:-5.0}
+      SCOREBOARD_HTTP_TIMEOUT: ${SCOREBOARD_HTTP_TIMEOUT:-10.0}
+      SCOREBOARD_CHART_TOP: ${SCOREBOARD_CHART_TOP:-10}
+      SCOREBOARD_EVENT_LIMIT: ${SCOREBOARD_EVENT_LIMIT:-100}
+      SCOREBOARD_VERIFY_SSL: "false"
+    expose:
+      - "8000"
+    networks:
+      - cstrike-ops-network
+    depends_on:
+      - ops-backend
+    restart: unless-stopped
+
+  nginx:
+    build:
+      context: ./nginx
+    container_name: cstrike-nginx
+    environment:
+      TZ: Asia/Seoul
+      # SSL 인증서 SAN에 박힐 서버 IP. .env에서 SERVER_IP를 설정 (default: 192.168.100.129).
+      # 다른 서버에 배포 시 .env의 SERVER_IP만 변경하면 docker compose up -d --build 한 번으로 새 IP에 맞는 인증서 자동 발급.
+      SERVER_IP: ${SERVER_IP:-192.168.100.129}
+    ports:
+      - "80:80"       # HTTP -> HTTPS 리다이렉트
+      - "443:443"     # 스코어보드 (공개 HTTPS)
+      - "8443:8443"   # 운영 포털 (관리자 HTTPS)
+    volumes:
+      - ./nginx/ssl:/etc/nginx/ssl                       # SSL 디렉토리 (entrypoint가 호스트에 인증서 자동 생성, 멱등)
+    networks:
+      - cstrike-ops-network
+    depends_on:
+      - ops-frontend
+      - ops-backend
+      - scoreboard
+    restart: unless-stopped
+
+  minio:
+    image: minio/minio:RELEASE.2024-04-06T05-26-02Z
+    container_name: cstrike-minio
+    command: server /data --console-address ":9001"
+    environment:
+      TZ: Asia/Seoul
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-cstrike}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-cstrike_secret}
+    volumes:
+      - minio_data:/data
+    expose:
+      - "9000"
+      - "9001"
+    networks:
+      - cstrike-ops-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  deploy-service:
+    build:
+      context: ../services/deploy
+      dockerfile: Dockerfile
+    container_name: cstrike-deploy-service
+    environment:
+      TZ: Asia/Seoul
+      REDIS_URL: redis://:${REDIS_PASSWORD:-redis_password}@redis:6379/1
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY:-cstrike-internal-2026}
+      OPS_BACKEND_URL: http://ops-backend:8400
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-cstrike}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-cstrike_secret}
+      MINIO_BUCKET: cstrike-builds
+      DOCKER_HOST: unix:///var/run/docker.sock
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    expose:
+      - "8450"
+    networks:
+      - cstrike-ops-network
+    depends_on:
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    group_add:
+      - "${DOCKER_GID:-999}"
+    restart: unless-stopped
+
+  scoring-engine:
+    build:
+      context: ../services/scoring
+      dockerfile: Dockerfile
+    container_name: cstrike-scoring-engine
+    env_file:
+      - ../.env
+    environment:
+      TZ: Asia/Seoul
+      SCORING_DATABASE_URL: postgresql+asyncpg://ops_svc:${POSTGRES_PASSWORD:-ops_password}@postgres:5432/ops_db
+      SCORING_REDIS_URL: redis://:${REDIS_PASSWORD:-redis_password}@redis:6379/0
+    volumes:
+      - ./keys/scoring:/app/keys:ro
+    expose:
+      - "8460"
+    networks:
+      - cstrike-ops-network
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8460/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  discord-bot:
+    build:
+      context: ../services/discord_bot
+      dockerfile: Dockerfile
+    container_name: cstrike-discord-bot
+    env_file:
+      - ../.env
+    environment:
+      TZ: Asia/Seoul
+      # PostgreSQL 연결 (cstrike 스키마 search_path는 db/connection.py에서 설정)
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_USER: ops_svc
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ops_password}
+      POSTGRES_DATABASE: ops_db
+      POSTGRES_SCHEMA: cstrike
+      # Discord — 납품 시 운영자가 실 토큰 주입 (feedback_closed_network_secrets.md)
+      DISCORD_TOKEN: ${DISCORD_TOKEN:-placeholder-discord-token}
+      GUILD_ID: ${DISCORD_GUILD_ID:-0}
+      AUDIT_LOG_CHANNEL_ID: ${DISCORD_AUDIT_LOG_CHANNEL_ID:-0}
+      TICKET_CATEGORY_ID: ${DISCORD_TICKET_CATEGORY_ID:-0}
+      # 내부 API (봇 ← 운영포털/외부)
+      BOT_API_URL: http://0.0.0.0:5000
+      BOT_API_BASE_URL: http://ops-backend:8400/api/v1/bot
+      BOT_API_KEY: ${BOT_API_KEY:-cstrike-bot-internal-key-change-me}
+      BOT_COMPETITION_ID: ${BOT_COMPETITION_ID:-}
+      # 운영포털 연동
+      REGISTER_API_URL: http://ops-backend:8400/api/v1/auth/discord/start
+      REGISTER_API_KEY: ${BOT_API_KEY:-cstrike-bot-internal-key-change-me}
+      FLAG_API_URL: http://ops-backend:8400/api/v1/bot/flags/submit
+      FLAG_API_KEY: ${BOT_API_KEY:-cstrike-bot-internal-key-change-me}
+      # 역할 이름 (Guild 내에서 검색 기준)
+      OPERATOR_ROLE_NAME: ${DISCORD_OPERATOR_ROLE_NAME:-운영진}
+      AUTHENTICATED_ROLE_NAME: ${DISCORD_AUTHENTICATED_ROLE_NAME:-C-GUARD 인증}
+      UNAUTHENTICATED_ROLE_NAME: ${DISCORD_UNAUTHENTICATED_ROLE_NAME:-C-GUARD 제한}
+    expose:
+      - "5000"
+    networks:
+      - cstrike-ops-network
+    depends_on:
+      postgres:
+        condition: service_healthy
+      ops-backend:
+        condition: service_started
+    restart: unless-stopped
+
+  cguard-server:
+    build:
+      context: ../services/cguard
+      dockerfile: Dockerfile
+    container_name: cstrike-cguard-server
+    environment:
+      TZ: Asia/Seoul
+      PORT: "8500"
+      STATE_MODE: postgres
+      STATE_PG_CONNECTION_STRING: postgresql://ops_svc:${POSTGRES_PASSWORD:-ops_password}@postgres:5432/ops_db
+      STATE_PG_SCHEMA: cstrike
+      STATE_PG_PSQL_BIN: psql
+      ADMIN_API_KEY: ${CGUARD_ADMIN_API_KEY:-cguard-admin-key-change-me}
+      ADMIN_SIGNING_SECRET: ${CGUARD_ADMIN_SIGNING_SECRET:-cguard-admin-signing-secret}
+      # Integration API 활성화 (ops-backend가 프록시 호출)
+      INTEGRATION_API_ENABLED: "true"
+      CGUARD_INTEGRATION_TOKEN: ${CGUARD_INTEGRATION_TOKEN:-cguard-integration-token-change-me}
+    expose:
+      - "8500"
+    networks:
+      - cstrike-ops-network
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8500/health | grep -q '\"status\":\"ok\"'"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  redis_data:
+  minio_data:
+
+networks:
+  cstrike-ops-network:
+    name: cstrike-ops-network
+    driver: bridge

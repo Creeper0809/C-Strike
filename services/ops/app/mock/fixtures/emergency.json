@@ -1,0 +1,243 @@
+{
+  "vanguard": {
+    "zones": [
+      {
+        "zone_id": "zone-1",
+        "name": "참가자 네트워크",
+        "type": "participant",
+        "status": "down",
+        "connected_count": 0
+      },
+      {
+        "zone_id": "zone-2",
+        "name": "운영진 네트워크",
+        "type": "operations",
+        "status": "up",
+        "connected_count": 5
+      }
+    ],
+    "zone_details": {
+      "zone-1": {
+        "zone_id": "zone-1",
+        "name": "참가자 네트워크",
+        "type": "participant",
+        "status": "down",
+        "connected_clients": []
+      },
+      "zone-2": {
+        "zone_id": "zone-2",
+        "name": "운영진 네트워크",
+        "type": "operations",
+        "status": "up",
+        "connected_clients": [
+          { "team_id": "ops-1", "ip": "10.0.2.1", "connected_at": "2026-03-27T07:50:00Z" },
+          { "team_id": "ops-2", "ip": "10.0.2.2", "connected_at": "2026-03-27T07:52:00Z" },
+          { "team_id": "ops-3", "ip": "10.0.2.3", "connected_at": "2026-03-27T07:55:00Z" },
+          { "team_id": "ops-4", "ip": "10.0.2.4", "connected_at": "2026-03-27T10:20:00Z" },
+          { "team_id": "ops-5", "ip": "10.0.2.5", "connected_at": "2026-03-27T10:21:00Z" }
+        ]
+      }
+    },
+    "health": {
+      "status": "down",
+      "version": "1.0.0"
+    }
+  },
+  "scoring": {
+    "status": {
+      "is_running": false,
+      "current_round": 15,
+      "total_rounds": 100,
+      "last_round_at": "2026-03-27T10:15:00Z",
+      "success_rate": 0,
+      "teams_checked": 0,
+      "services_checked": 0
+    },
+    "rounds": [
+      { "round": 11, "started_at": "2026-03-27T10:03:00Z", "finished_at": "2026-03-27T10:03:55Z", "success": 30, "fail": 0, "error": 0 },
+      { "round": 12, "started_at": "2026-03-27T10:06:00Z", "finished_at": "2026-03-27T10:06:58Z", "success": 28, "fail": 2, "error": 0 },
+      { "round": 13, "started_at": "2026-03-27T10:09:00Z", "finished_at": "2026-03-27T10:09:52Z", "success": 20, "fail": 5, "error": 5 },
+      { "round": 14, "started_at": "2026-03-27T10:12:00Z", "finished_at": "2026-03-27T10:14:30Z", "success": 10, "fail": 10, "error": 10 },
+      { "round": 15, "started_at": "2026-03-27T10:15:00Z", "finished_at": "2026-03-27T10:19:00Z", "success": 5, "fail": 15, "error": 10 }
+    ],
+    "errors": [
+      { "error_id": "err-001", "team_id": "team-1", "service": "web-service", "type": "connection_refused", "message": "컨테이너 중단 — 서비스 연결 불가", "round": 15, "timestamp": "2026-03-27T10:15:10Z" },
+      { "error_id": "err-002", "team_id": "team-2", "service": "db-service", "type": "connection_refused", "message": "컨테이너 중단 — 서비스 연결 불가", "round": 15, "timestamp": "2026-03-27T10:15:15Z" },
+      { "error_id": "err-003", "team_id": "team-3", "service": "api-service", "type": "connection_refused", "message": "컨테이너 중단 — 서비스 연결 불가", "round": 15, "timestamp": "2026-03-27T10:15:20Z" },
+      { "error_id": "err-004", "team_id": "team-4", "service": "web-service", "type": "connection_refused", "message": "컨테이너 중단 — 서비스 연결 불가", "round": 15, "timestamp": "2026-03-27T10:15:25Z" },
+      { "error_id": "err-005", "team_id": "team-5", "service": "db-service", "type": "connection_refused", "message": "컨테이너 중단 — 서비스 연결 불가", "round": 15, "timestamp": "2026-03-27T10:15:30Z" }
+    ],
+    "attacks": [],
+    "health": {
+      "status": "down",
+      "version": "1.0.0"
+    }
+  },
+  "containers": {
+    "teams": [
+      {
+        "team_id": "team-1",
+        "name": "사이버독수리",
+        "containers": [
+          { "name": "web-service", "status": "stopped", "cpu_usage": 0, "memory_usage": 0, "uptime": "0m" },
+          { "name": "db-service", "status": "running", "cpu_usage": 5, "memory_usage": 180, "uptime": "2h 15m" },
+          { "name": "api-service", "status": "stopped", "cpu_usage": 0, "memory_usage": 0, "uptime": "0m" }
+        ]
+      },
+      {
+        "team_id": "team-2",
+        "name": "디지털방패",
+        "containers": [
+          { "name": "web-service", "status": "stopped", "cpu_usage": 0, "memory_usage": 0, "uptime": "0m" },
+          { "name": "db-service", "status": "stopped", "cpu_usage": 0, "memory_usage": 0, "uptime": "0m" },
+          { "name": "api-service", "status": "running", "cpu_usage": 3, "memory_usage": 120, "uptime": "2h 15m" }
+        ]
+      },
+      {
+        "team_id": "team-3",
+        "name": "코드브레이커",
+        "containers": [
+          { "name": "web-service", "status": "running", "cpu_usage": 4, "memory_usage": 150, "uptime": "2h 15m" },
+          { "name": "db-service", "status": "stopped", "cpu_usage": 0, "memory_usage": 0, "uptime": "0m" },
+          { "name": "api-service", "status": "stopped", "cpu_usage": 0, "memory_usage": 0, "uptime": "0m" }
+        ]
+      },
+      {
+        "team_id": "team-4",
+        "name": "넷가디언",
+        "containers": [
+          { "name": "web-service", "status": "stopped", "cpu_usage": 0, "memory_usage": 0, "uptime": "0m" },
+          { "name": "db-service", "status": "stopped", "cpu_usage": 0, "memory_usage": 0, "uptime": "0m" },
+          { "name": "api-service", "status": "stopped", "cpu_usage": 0, "memory_usage": 0, "uptime": "0m" }
+        ]
+      },
+      {
+        "team_id": "team-5",
+        "name": "보안특공대",
+        "containers": [
+          { "name": "web-service", "status": "stopped", "cpu_usage": 0, "memory_usage": 0, "uptime": "0m" },
+          { "name": "db-service", "status": "stopped", "cpu_usage": 0, "memory_usage": 0, "uptime": "0m" },
+          { "name": "api-service", "status": "running", "cpu_usage": 2, "memory_usage": 100, "uptime": "2h 15m" }
+        ]
+      },
+      {
+        "team_id": "team-6",
+        "name": "제로데이",
+        "containers": [
+          { "name": "web-service", "status": "running", "cpu_usage": 6, "memory_usage": 160, "uptime": "2h 15m" },
+          { "name": "db-service", "status": "running", "cpu_usage": 8, "memory_usage": 200, "uptime": "2h 15m" },
+          { "name": "api-service", "status": "running", "cpu_usage": 5, "memory_usage": 140, "uptime": "2h 15m" }
+        ]
+      },
+      {
+        "team_id": "team-7",
+        "name": "방화벽",
+        "containers": [
+          { "name": "web-service", "status": "running", "cpu_usage": 7, "memory_usage": 170, "uptime": "2h 15m" },
+          { "name": "db-service", "status": "running", "cpu_usage": 9, "memory_usage": 210, "uptime": "2h 15m" },
+          { "name": "api-service", "status": "stopped", "cpu_usage": 0, "memory_usage": 0, "uptime": "0m" }
+        ]
+      },
+      {
+        "team_id": "team-8",
+        "name": "크래커헌터",
+        "containers": [
+          { "name": "web-service", "status": "stopped", "cpu_usage": 0, "memory_usage": 0, "uptime": "0m" },
+          { "name": "db-service", "status": "running", "cpu_usage": 6, "memory_usage": 190, "uptime": "2h 15m" },
+          { "name": "api-service", "status": "running", "cpu_usage": 4, "memory_usage": 130, "uptime": "2h 15m" }
+        ]
+      },
+      {
+        "team_id": "team-9",
+        "name": "해커스랩",
+        "containers": [
+          { "name": "web-service", "status": "stopped", "cpu_usage": 0, "memory_usage": 0, "uptime": "0m" },
+          { "name": "db-service", "status": "stopped", "cpu_usage": 0, "memory_usage": 0, "uptime": "0m" },
+          { "name": "api-service", "status": "stopped", "cpu_usage": 0, "memory_usage": 0, "uptime": "0m" }
+        ]
+      },
+      {
+        "team_id": "team-10",
+        "name": "시큐리티원",
+        "containers": [
+          { "name": "web-service", "status": "running", "cpu_usage": 5, "memory_usage": 155, "uptime": "2h 15m" },
+          { "name": "db-service", "status": "running", "cpu_usage": 7, "memory_usage": 185, "uptime": "2h 15m" },
+          { "name": "api-service", "status": "running", "cpu_usage": 4, "memory_usage": 125, "uptime": "2h 15m" }
+        ]
+      }
+    ],
+    "health": {
+      "status": "down",
+      "total_containers": 30,
+      "running_containers": 15
+    }
+  },
+  "scoreboard": {
+    "teams": [
+      { "team_id": "team-1", "name": "사이버독수리", "ad_score": 900, "bonus_score": 200, "total_score": 1100, "rank": 1 },
+      { "team_id": "team-3", "name": "코드브레이커", "ad_score": 850, "bonus_score": 300, "total_score": 1150, "rank": 2 },
+      { "team_id": "team-5", "name": "보안특공대", "ad_score": 820, "bonus_score": 100, "total_score": 920, "rank": 3 },
+      { "team_id": "team-8", "name": "크래커헌터", "ad_score": 780, "bonus_score": 100, "total_score": 880, "rank": 4 },
+      { "team_id": "team-7", "name": "방화벽", "ad_score": 750, "bonus_score": 50, "total_score": 800, "rank": 5 },
+      { "team_id": "team-6", "name": "제로데이", "ad_score": 700, "bonus_score": 0, "total_score": 700, "rank": 6 },
+      { "team_id": "team-4", "name": "넷가디언", "ad_score": 680, "bonus_score": 0, "total_score": 680, "rank": 7 },
+      { "team_id": "team-2", "name": "디지털방패", "ad_score": 650, "bonus_score": 0, "total_score": 650, "rank": 8 },
+      { "team_id": "team-9", "name": "해커스랩", "ad_score": 600, "bonus_score": 0, "total_score": 600, "rank": 9 },
+      { "team_id": "team-10", "name": "시큐리티원", "ad_score": 500, "bonus_score": 0, "total_score": 500, "rank": 10 }
+    ],
+    "frozen": true,
+    "chains": [
+      { "service": "web-service", "attack_success_rate": 72.5, "defense_success_rate": 85.0 },
+      { "service": "db-service", "attack_success_rate": 60.0, "defense_success_rate": 90.0 },
+      { "service": "api-service", "attack_success_rate": 78.3, "defense_success_rate": 70.5 }
+    ],
+    "bonus": [
+      {
+        "challenge_id": "bonus-1",
+        "title": "웹 취약점 분석",
+        "category": "web",
+        "current_score": 500,
+        "solvers": [
+          { "team_id": "team-1", "solved_at": "2026-03-27T09:30:00Z" },
+          { "team_id": "team-3", "solved_at": "2026-03-27T09:45:00Z" }
+        ]
+      },
+      {
+        "challenge_id": "bonus-2",
+        "title": "암호 해독 챌린지",
+        "category": "crypto",
+        "current_score": 500,
+        "solvers": [
+          { "team_id": "team-3", "solved_at": "2026-03-27T10:00:00Z" }
+        ]
+      }
+    ],
+    "health": {
+      "status": "down",
+      "version": "1.0.0"
+    }
+  },
+  "discord": {
+    "tickets": [
+      { "ticket_id": "ticket-001", "status": "open", "title": "VPN 접속 불안정", "author": "team-4", "created_at": "2026-03-27T09:10:00Z" },
+      { "ticket_id": "ticket-002", "status": "open", "title": "컨테이너 재시작 요청", "author": "team-7", "created_at": "2026-03-27T09:35:00Z" },
+      { "ticket_id": "ticket-003", "status": "open", "title": "점수 확인 문의", "author": "team-10", "created_at": "2026-03-27T09:50:00Z" },
+      { "ticket_id": "ticket-004", "status": "open", "title": "참가자 네트워크 전체 다운", "author": "team-1", "created_at": "2026-03-27T10:20:00Z" },
+      { "ticket_id": "ticket-005", "status": "open", "title": "모든 서비스 접속 불가", "author": "team-2", "created_at": "2026-03-27T10:20:30Z" },
+      { "ticket_id": "ticket-006", "status": "open", "title": "채점 중단 확인 요청", "author": "team-3", "created_at": "2026-03-27T10:21:00Z" },
+      { "ticket_id": "ticket-007", "status": "open", "title": "컨테이너 전부 중단됨", "author": "team-4", "created_at": "2026-03-27T10:21:30Z" },
+      { "ticket_id": "ticket-008", "status": "open", "title": "대회 진행 가능 여부 문의", "author": "team-5", "created_at": "2026-03-27T10:22:00Z" },
+      { "ticket_id": "ticket-009", "status": "open", "title": "점수 프리즈 상태인지 확인", "author": "team-6", "created_at": "2026-03-27T10:22:30Z" },
+      { "ticket_id": "ticket-010", "status": "open", "title": "VPN 재접속 시도 중 — 실패", "author": "team-7", "created_at": "2026-03-27T10:23:00Z" },
+      { "ticket_id": "ticket-011", "status": "open", "title": "비상 상황 공지 요청", "author": "team-8", "created_at": "2026-03-27T10:23:30Z" },
+      { "ticket_id": "ticket-012", "status": "open", "title": "팀 서버 전체 접속 불가", "author": "team-9", "created_at": "2026-03-27T10:24:00Z" },
+      { "ticket_id": "ticket-013", "status": "open", "title": "대회 일시 중단 공지 부탁", "author": "team-1", "created_at": "2026-03-27T10:25:00Z" },
+      { "ticket_id": "ticket-014", "status": "open", "title": "복구 예상 시간 알려주세요", "author": "team-3", "created_at": "2026-03-27T10:26:00Z" },
+      { "ticket_id": "ticket-015", "status": "open", "title": "긴급 — 모든 인프라 다운 보고", "author": "team-5", "created_at": "2026-03-27T10:27:00Z" }
+    ],
+    "health": {
+      "status": "degraded",
+      "connected_guilds": 1
+    }
+  }
+}

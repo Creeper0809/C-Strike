@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>C-Guard CLI Reason Detail</title>
+    <link rel="stylesheet" href="/admin/llm/reason.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div>
+        <h1>CLI Reason Detail</h1>
+        <p>Session-level evidence view for why CLI usage was marked yes/no.</p>
+      </div>
+      <a class="secondary-link" href="/admin/llm">Back to LLM Monitor</a>
+    </header>
+
+    <main class="layout">
+      <section class="card">
+        <form id="reasonAuthForm" class="auth-form">
+          <input id="usernameInput" type="text" value="admin-reviewer" required />
+          <input id="passwordInput" type="password" value="admin-reviewer" required />
+          <input id="adminKeyInput" type="password" placeholder="admin key (optional)" />
+          <button type="submit">Login</button>
+          <button id="reloadBtn" type="button">Reload</button>
+        </form>
+        <div id="authState" class="state">Not authenticated.</div>
+        <div id="viewState" class="state">Waiting for session data.</div>
+      </section>
+
+      <section class="card">
+        <h2>Session Summary</h2>
+        <div id="summaryGrid" class="summary-grid"></div>
+      </section>
+
+      <section class="card">
+        <h2>CLI Evidence</h2>
+        <table class="reason-table">
+          <thead>
+            <tr>
+              <th>Timestamp</th>
+              <th>Event</th>
+              <th>Hint</th>
+              <th>Process</th>
+              <th>Command Line</th>
+            </tr>
+          </thead>
+          <tbody id="reasonRowsBody"></tbody>
+        </table>
+      </section>
+    </main>
+
+    <script src="/admin/llm/reason.js"></script>
+  </body>
+</html>

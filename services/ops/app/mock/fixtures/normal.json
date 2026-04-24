@@ -1,0 +1,232 @@
+{
+  "vanguard": {
+    "zones": [
+      {
+        "zone_id": "zone-1",
+        "name": "참가자 네트워크",
+        "type": "participant",
+        "status": "up",
+        "connected_count": 50
+      },
+      {
+        "zone_id": "zone-2",
+        "name": "운영진 네트워크",
+        "type": "operations",
+        "status": "up",
+        "connected_count": 5
+      }
+    ],
+    "zone_details": {
+      "zone-1": {
+        "zone_id": "zone-1",
+        "name": "참가자 네트워크",
+        "type": "participant",
+        "status": "up",
+        "connected_clients": [
+          { "team_id": "team-1", "ip": "10.0.1.11", "connected_at": "2026-03-27T08:00:12Z" },
+          { "team_id": "team-2", "ip": "10.0.1.12", "connected_at": "2026-03-27T08:01:05Z" },
+          { "team_id": "team-3", "ip": "10.0.1.13", "connected_at": "2026-03-27T08:01:30Z" },
+          { "team_id": "team-4", "ip": "10.0.1.14", "connected_at": "2026-03-27T08:02:00Z" },
+          { "team_id": "team-5", "ip": "10.0.1.15", "connected_at": "2026-03-27T08:02:45Z" }
+        ]
+      },
+      "zone-2": {
+        "zone_id": "zone-2",
+        "name": "운영진 네트워크",
+        "type": "operations",
+        "status": "up",
+        "connected_clients": [
+          { "team_id": "ops-1", "ip": "10.0.2.1", "connected_at": "2026-03-27T07:50:00Z" },
+          { "team_id": "ops-2", "ip": "10.0.2.2", "connected_at": "2026-03-27T07:52:00Z" },
+          { "team_id": "ops-3", "ip": "10.0.2.3", "connected_at": "2026-03-27T07:55:00Z" }
+        ]
+      }
+    },
+    "health": {
+      "status": "ok",
+      "version": "1.0.0"
+    }
+  },
+  "scoring": {
+    "status": {
+      "is_running": true,
+      "current_round": 15,
+      "total_rounds": 100,
+      "last_round_at": "2026-03-27T10:15:00Z",
+      "success_rate": 98.5,
+      "teams_checked": 10,
+      "services_checked": 3
+    },
+    "rounds": [
+      { "round": 11, "started_at": "2026-03-27T10:03:00Z", "finished_at": "2026-03-27T10:03:55Z", "success": 30, "fail": 0, "error": 0 },
+      { "round": 12, "started_at": "2026-03-27T10:06:00Z", "finished_at": "2026-03-27T10:06:58Z", "success": 29, "fail": 1, "error": 0 },
+      { "round": 13, "started_at": "2026-03-27T10:09:00Z", "finished_at": "2026-03-27T10:09:52Z", "success": 30, "fail": 0, "error": 0 },
+      { "round": 14, "started_at": "2026-03-27T10:12:00Z", "finished_at": "2026-03-27T10:12:57Z", "success": 28, "fail": 2, "error": 0 },
+      { "round": 15, "started_at": "2026-03-27T10:15:00Z", "finished_at": "2026-03-27T10:15:54Z", "success": 30, "fail": 0, "error": 0 }
+    ],
+    "errors": [],
+    "attacks": [
+      { "attack_id": "atk-001", "attacker": "team-3", "target": "team-7", "service": "web-service", "result": "success", "timestamp": "2026-03-27T10:14:10Z" },
+      { "attack_id": "atk-002", "attacker": "team-5", "target": "team-2", "service": "db-service", "result": "success", "timestamp": "2026-03-27T10:14:25Z" },
+      { "attack_id": "atk-003", "attacker": "team-8", "target": "team-1", "service": "api-service", "result": "success", "timestamp": "2026-03-27T10:14:40Z" }
+    ],
+    "health": {
+      "status": "ok",
+      "version": "1.0.0"
+    }
+  },
+  "containers": {
+    "teams": [
+      {
+        "team_id": "team-1",
+        "name": "사이버독수리",
+        "containers": [
+          { "name": "web-service", "status": "running", "cpu_usage": 8, "memory_usage": 192, "uptime": "2h 15m" },
+          { "name": "db-service", "status": "running", "cpu_usage": 12, "memory_usage": 256, "uptime": "2h 15m" },
+          { "name": "api-service", "status": "running", "cpu_usage": 6, "memory_usage": 148, "uptime": "2h 15m" }
+        ]
+      },
+      {
+        "team_id": "team-2",
+        "name": "디지털방패",
+        "containers": [
+          { "name": "web-service", "status": "running", "cpu_usage": 10, "memory_usage": 200, "uptime": "2h 15m" },
+          { "name": "db-service", "status": "running", "cpu_usage": 14, "memory_usage": 280, "uptime": "2h 15m" },
+          { "name": "api-service", "status": "running", "cpu_usage": 7, "memory_usage": 160, "uptime": "2h 15m" }
+        ]
+      },
+      {
+        "team_id": "team-3",
+        "name": "코드브레이커",
+        "containers": [
+          { "name": "web-service", "status": "running", "cpu_usage": 9, "memory_usage": 185, "uptime": "2h 15m" },
+          { "name": "db-service", "status": "running", "cpu_usage": 11, "memory_usage": 240, "uptime": "2h 15m" },
+          { "name": "api-service", "status": "running", "cpu_usage": 5, "memory_usage": 128, "uptime": "2h 15m" }
+        ]
+      },
+      {
+        "team_id": "team-4",
+        "name": "넷가디언",
+        "containers": [
+          { "name": "web-service", "status": "running", "cpu_usage": 7, "memory_usage": 175, "uptime": "2h 15m" },
+          { "name": "db-service", "status": "running", "cpu_usage": 13, "memory_usage": 265, "uptime": "2h 15m" },
+          { "name": "api-service", "status": "running", "cpu_usage": 8, "memory_usage": 155, "uptime": "2h 15m" }
+        ]
+      },
+      {
+        "team_id": "team-5",
+        "name": "보안특공대",
+        "containers": [
+          { "name": "web-service", "status": "running", "cpu_usage": 11, "memory_usage": 210, "uptime": "2h 15m" },
+          { "name": "db-service", "status": "running", "cpu_usage": 15, "memory_usage": 300, "uptime": "2h 15m" },
+          { "name": "api-service", "status": "running", "cpu_usage": 9, "memory_usage": 170, "uptime": "2h 15m" }
+        ]
+      },
+      {
+        "team_id": "team-6",
+        "name": "제로데이",
+        "containers": [
+          { "name": "web-service", "status": "running", "cpu_usage": 6, "memory_usage": 165, "uptime": "2h 15m" },
+          { "name": "db-service", "status": "running", "cpu_usage": 10, "memory_usage": 230, "uptime": "2h 15m" },
+          { "name": "api-service", "status": "running", "cpu_usage": 7, "memory_usage": 140, "uptime": "2h 15m" }
+        ]
+      },
+      {
+        "team_id": "team-7",
+        "name": "방화벽",
+        "containers": [
+          { "name": "web-service", "status": "running", "cpu_usage": 12, "memory_usage": 220, "uptime": "2h 15m" },
+          { "name": "db-service", "status": "running", "cpu_usage": 14, "memory_usage": 290, "uptime": "2h 15m" },
+          { "name": "api-service", "status": "running", "cpu_usage": 8, "memory_usage": 158, "uptime": "2h 15m" }
+        ]
+      },
+      {
+        "team_id": "team-8",
+        "name": "크래커헌터",
+        "containers": [
+          { "name": "web-service", "status": "running", "cpu_usage": 10, "memory_usage": 198, "uptime": "2h 15m" },
+          { "name": "db-service", "status": "running", "cpu_usage": 13, "memory_usage": 270, "uptime": "2h 15m" },
+          { "name": "api-service", "status": "running", "cpu_usage": 6, "memory_usage": 135, "uptime": "2h 15m" }
+        ]
+      },
+      {
+        "team_id": "team-9",
+        "name": "해커스랩",
+        "containers": [
+          { "name": "web-service", "status": "running", "cpu_usage": 8, "memory_usage": 180, "uptime": "2h 15m" },
+          { "name": "db-service", "status": "running", "cpu_usage": 11, "memory_usage": 245, "uptime": "2h 15m" },
+          { "name": "api-service", "status": "running", "cpu_usage": 5, "memory_usage": 130, "uptime": "2h 15m" }
+        ]
+      },
+      {
+        "team_id": "team-10",
+        "name": "시큐리티원",
+        "containers": [
+          { "name": "web-service", "status": "running", "cpu_usage": 9, "memory_usage": 195, "uptime": "2h 15m" },
+          { "name": "db-service", "status": "running", "cpu_usage": 12, "memory_usage": 255, "uptime": "2h 15m" },
+          { "name": "api-service", "status": "running", "cpu_usage": 7, "memory_usage": 150, "uptime": "2h 15m" }
+        ]
+      }
+    ],
+    "health": {
+      "status": "ok",
+      "total_containers": 30,
+      "running_containers": 30
+    }
+  },
+  "scoreboard": {
+    "teams": [
+      { "team_id": "team-1", "name": "사이버독수리", "ad_score": 900, "bonus_score": 200, "total_score": 1100, "rank": 1 },
+      { "team_id": "team-3", "name": "코드브레이커", "ad_score": 850, "bonus_score": 300, "total_score": 1150, "rank": 2 },
+      { "team_id": "team-5", "name": "보안특공대", "ad_score": 820, "bonus_score": 100, "total_score": 920, "rank": 3 },
+      { "team_id": "team-8", "name": "크래커헌터", "ad_score": 780, "bonus_score": 100, "total_score": 880, "rank": 4 },
+      { "team_id": "team-7", "name": "방화벽", "ad_score": 750, "bonus_score": 50, "total_score": 800, "rank": 5 },
+      { "team_id": "team-6", "name": "제로데이", "ad_score": 700, "bonus_score": 0, "total_score": 700, "rank": 6 },
+      { "team_id": "team-4", "name": "넷가디언", "ad_score": 680, "bonus_score": 0, "total_score": 680, "rank": 7 },
+      { "team_id": "team-2", "name": "디지털방패", "ad_score": 650, "bonus_score": 0, "total_score": 650, "rank": 8 },
+      { "team_id": "team-9", "name": "해커스랩", "ad_score": 600, "bonus_score": 0, "total_score": 600, "rank": 9 },
+      { "team_id": "team-10", "name": "시큐리티원", "ad_score": 500, "bonus_score": 0, "total_score": 500, "rank": 10 }
+    ],
+    "chains": [
+      { "service": "web-service", "attack_success_rate": 72.5, "defense_success_rate": 85.0 },
+      { "service": "db-service", "attack_success_rate": 60.0, "defense_success_rate": 90.0 },
+      { "service": "api-service", "attack_success_rate": 78.3, "defense_success_rate": 70.5 }
+    ],
+    "bonus": [
+      {
+        "challenge_id": "bonus-1",
+        "title": "웹 취약점 분석",
+        "category": "web",
+        "current_score": 500,
+        "solvers": [
+          { "team_id": "team-1", "solved_at": "2026-03-27T09:30:00Z" },
+          { "team_id": "team-3", "solved_at": "2026-03-27T09:45:00Z" }
+        ]
+      },
+      {
+        "challenge_id": "bonus-2",
+        "title": "암호 해독 챌린지",
+        "category": "crypto",
+        "current_score": 500,
+        "solvers": [
+          { "team_id": "team-3", "solved_at": "2026-03-27T10:00:00Z" }
+        ]
+      }
+    ],
+    "health": {
+      "status": "ok",
+      "version": "1.0.0"
+    }
+  },
+  "discord": {
+    "tickets": [
+      { "ticket_id": "ticket-001", "status": "open", "title": "VPN 접속 불안정", "author": "team-4", "created_at": "2026-03-27T09:10:00Z" },
+      { "ticket_id": "ticket-002", "status": "open", "title": "컨테이너 재시작 요청", "author": "team-7", "created_at": "2026-03-27T09:35:00Z" },
+      { "ticket_id": "ticket-003", "status": "open", "title": "점수 확인 문의", "author": "team-10", "created_at": "2026-03-27T09:50:00Z" }
+    ],
+    "health": {
+      "status": "ok",
+      "connected_guilds": 1
+    }
+  }
+}

@@ -1,0 +1,35 @@
+# 개발 환경 전용 오버라이드
+# 사용법: docker compose -f docker-compose.yml -f docker-compose.dev.yml up
+
+services:
+  ops-backend:
+    build:
+      target: development
+    volumes:
+      - ../services/ops:/app
+    environment:
+      USE_MOCK_EXTERNALS: "true"
+      VANGUARD_URL: http://ops-mock:8401
+      SCORING_URL: http://ops-mock:8401
+      CONTAINER_MANAGER_URL: http://ops-mock:8401
+      SCOREBOARD_URL: http://ops-mock:8401
+      DISCORD_BOT_URL: http://ops-mock:8401
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      ops-mock:
+        condition: service_started
+
+  ops-frontend:
+    build:
+      target: builder
+    command: ["npm", "run", "dev"]
+    volumes:
+      - ../frontend/src:/app/src
+    environment:
+      NEXT_PUBLIC_API_URL: http://ops-backend:8400
+
+  ops-mock:
+    profiles: []

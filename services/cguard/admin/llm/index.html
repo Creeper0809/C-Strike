@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>C-Guard Admin LLM Monitor</title>
+    <link rel="stylesheet" href="/admin/llm/styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div>
+        <h1>C-Guard LLM Activity Monitor</h1>
+        <p>Dedicated admin view for LLM-domain and CLI-risk telemetry.</p>
+      </div>
+      <form id="llmAuthForm" class="auth-form">
+        <input id="usernameInput" type="text" value="admin-reviewer" required />
+        <input id="passwordInput" type="password" value="admin-reviewer" required />
+        <input id="adminKeyInput" type="password" placeholder="admin key (optional)" />
+        <button type="submit">Login</button>
+        <a class="secondary-link" href="/admin/classic">Open Full Admin</a>
+      </form>
+    </header>
+
+    <main class="layout">
+      <section class="card controls">
+        <div class="row">
+          <button id="reloadBtn" type="button">Reload</button>
+          <label>Limit <input id="limitInput" type="number" min="1" max="200" value="60" /></label>
+          <label class="inline-toggle"
+            ><input id="showAllSessionsToggle" type="checkbox" /> Show all sessions</label
+          >
+          <label class="inline-toggle"
+            ><input id="autoRefreshToggle" type="checkbox" checked /> Auto refresh</label
+          >
+          <label
+            >Interval(s)
+            <input id="refreshIntervalInput" type="number" min="3" max="60" value="8"
+          /></label>
+        </div>
+        <div id="authState" class="state">Not authenticated.</div>
+        <div id="viewState" class="state">Login first, then load sessions.</div>
+        <div id="summaryTags" class="state-tags"></div>
+        <div id="operatorToastHost" class="operator-toast-host" aria-live="polite"></div>
+      </section>
+
+      <section class="card">
+        <table class="llm-table">
+          <thead>
+            <tr>
+              <th>Discord[user]</th>
+              <th>Session</th>
+              <th>C-Guard</th>
+              <th>Status</th>
+              <th>LLM Events</th>
+              <th>LLM Link</th>
+              <th>CLI</th>
+              <th>Class</th>
+              <th>Confidence</th>
+              <th>Top Evidence</th>
+              <th>Latest Time</th>
+              <th>Decision</th>
+              <th>Reason</th>
+              <th>Action</th>
+              <th>Ban</th>
+            </tr>
+          </thead>
+          <tbody id="llmRowsBody"></tbody>
+        </table>
+      </section>
+    </main>
+
+    <script src="/admin/llm/app.js"></script>
+  </body>
+</html>

@@ -1,0 +1,4 @@
+# SSH 키 파일은 Git에 포함 금지
+*
+!.gitkeep
+!.gitignore
