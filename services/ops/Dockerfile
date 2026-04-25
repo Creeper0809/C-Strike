@@ -16,4 +16,4 @@ CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8400", "--reload
 # 프로덕션 스테이지
 FROM base AS production
 COPY . .
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8400", "--workers", "4"]
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8400", "--workers", "1"]

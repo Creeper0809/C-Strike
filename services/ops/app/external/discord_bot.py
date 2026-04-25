@@ -79,6 +79,13 @@ class DiscordBotClient(ExternalClient):
             f"/api/v1/run/requests/team/role/{role_id}",
         )
 
+    async def assign_team_role(self, discord_user_id: str, role_id: str) -> dict[str, Any]:
+        """운영포털에서 팀원 추가 시 호출 — 멤버에게 팀 역할 부여."""
+        return await self.post(
+            "/api/v1/run/requests/team/role/assign",
+            {"discord_user_id": discord_user_id, "role_id": role_id},
+        )
+
     async def grant_operator_role(self, discord_user_id: str) -> dict[str, Any]:
         """운영포털에서 운영자 생성/연동 시 호출 — 봇이 대상 멤버에게 '운영진' 역할 부여.
 
@@ -103,3 +110,7 @@ class DiscordBotClient(ExternalClient):
         return await self.delete(
             f"/api/v1/run/requests/operator/role/{discord_user_id}",
         )
+
+    async def list_guild_members(self) -> dict[str, Any]:
+        """Discord 길드 멤버 목록 조회."""
+        return await self.get("/api/v1/run/requests/guild/members")

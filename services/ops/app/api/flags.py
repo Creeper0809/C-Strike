@@ -51,6 +51,7 @@ async def list_flags(
     round_number: int | None = Query(None, description="라운드 번호 필터"),
     team_name: str | None = Query(None, description="팀명 필터 (부분 일치)"),
     service_name: str | None = Query(None, description="서비스명 필터 (부분 일치)"),
+    service_id: UUID | None = Query(None, description="서비스 ID 필터"),
     is_active: bool | None = Query(None, description="활성 플래그만 필터"),
     page: int = Query(1, ge=1),
     size: int = Query(20, ge=1, le=100),
@@ -100,6 +101,9 @@ async def list_flags(
         pattern = f"%{service_name}%"
         base_query = base_query.where(VulnService.name.ilike(pattern))
         count_query = count_query.join(VulnService, Flag.service_id == VulnService.id).where(VulnService.name.ilike(pattern))
+    if service_id is not None:
+        base_query = base_query.where(Flag.service_id == service_id)
+        count_query = count_query.where(Flag.service_id == service_id)
     if is_active is not None:
         base_query = base_query.where(Flag.is_active == is_active)
         count_query = count_query.where(Flag.is_active == is_active)
@@ -137,6 +141,7 @@ async def list_flag_submissions(
     competition_id: UUID,
     submitter_team_name: str | None = Query(None, description="제출 팀명 필터 (부분 일치)"),
     target_team_name: str | None = Query(None, description="대상(피해) 팀명 필터 (부분 일치)"),
+    service_id: UUID | None = Query(None, description="서비스 ID 필터"),
     verdict: str | None = Query(None, description="판정 필터"),
     round_number: int | None = Query(None, description="라운드 번호 필터"),
     page: int = Query(1, ge=1),
@@ -198,6 +203,9 @@ async def list_flag_submissions(
     if verdict is not None:
         base_query = base_query.where(FlagSubmission.verdict == verdict)
         count_query = count_query.where(FlagSubmission.verdict == verdict)
+    if service_id is not None:
+        base_query = base_query.where(FlagSubmission.service_id == service_id)
+        count_query = count_query.where(FlagSubmission.service_id == service_id)
     if round_number is not None:
         # base_query에서 이미 ScoringRound를 outerjoin 했으므로 where만 추가
         base_query = base_query.where(ScoringRound.round_number == round_number)
@@ -306,6 +314,7 @@ async def get_flag_submission(
 @router.get("/stats")
 async def get_flag_stats(
     competition_id: UUID,
+    service_id: UUID | None = Query(None, description="서비스 ID 필터"),
     db: AsyncSession = Depends(get_db),
     current_operator: Operator = Depends(get_current_operator),
 ) -> FlagStatsResponse:
@@ -318,7 +327,10 @@ async def get_flag_stats(
             select(func.count())
             .select_from(Flag)
             .join(ScoringRound, Flag.round_id == ScoringRound.id)
-            .where(ScoringRound.competition_id == competition_id)
+            .where(
+                ScoringRound.competition_id == competition_id,
+                *( [Flag.service_id == service_id] if service_id is not None else [] ),
+            )
         )
     ).scalar_one()
 
@@ -327,7 +339,10 @@ async def get_flag_stats(
         await db.execute(
             select(func.count())
             .select_from(FlagSubmission)
-            .where(FlagSubmission.competition_id == competition_id)
+            .where(
+                FlagSubmission.competition_id == competition_id,
+                *( [FlagSubmission.service_id == service_id] if service_id is not None else [] ),
+            )
         )
     ).scalar_one()
 
@@ -335,7 +350,10 @@ async def get_flag_stats(
     verdict_rows = (
         await db.execute(
             select(FlagSubmission.verdict, func.count().label("cnt"))
-            .where(FlagSubmission.competition_id == competition_id)
+            .where(
+                FlagSubmission.competition_id == competition_id,
+                *( [FlagSubmission.service_id == service_id] if service_id is not None else [] ),
+            )
             .group_by(FlagSubmission.verdict)
         )
     ).all()
@@ -360,7 +378,10 @@ async def get_flag_stats(
                 func.count(distinct(FlagSubmission.target_team_id)).label("unique_teams_attacked"),
             )
             .join(Team, FlagSubmission.submitter_team_id == Team.id)
-            .where(FlagSubmission.competition_id == competition_id)
+            .where(
+                FlagSubmission.competition_id == competition_id,
+                *( [FlagSubmission.service_id == service_id] if service_id is not None else [] ),
+            )
             .group_by(FlagSubmission.submitter_team_id, Team.name)
             .order_by(func.count().desc())
         )
@@ -396,7 +417,10 @@ async def get_flag_stats(
                 FlagSubmission,
                 (FlagSubmission.flag_id == Flag.id) & (FlagSubmission.verdict == "correct"),
             )
-            .where(ScoringRound.competition_id == competition_id)
+            .where(
+                ScoringRound.competition_id == competition_id,
+                *( [Flag.service_id == service_id] if service_id is not None else [] ),
+            )
             .group_by(Flag.team_id, Team.name)
             .order_by(Team.name)
         )
@@ -437,6 +461,7 @@ async def get_flag_stats(
             .where(
                 FlagSubmission.competition_id == competition_id,
                 FlagSubmission.verdict == "correct",
+                *( [FlagSubmission.service_id == service_id] if service_id is not None else [] ),
             )
             .group_by(FlagSubmission.service_id, VulnService.name)
             .order_by(func.count().desc())

@@ -1,6 +1,8 @@
 """배포 파이프라인 — 5단계 배포 로직 (SSH 원격 배포)"""
 import asyncio
 import json
+import re
+import shlex
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -99,6 +101,12 @@ def _update_team_service(team_id: str, service_id: str, data: dict):
         print(f"[경고] TeamService 콜백 실패: {e}")
 
 
+def _safe_service_slug(name: str) -> str:
+    """Docker 컨테이너 이름에 쓸 수 있는 안전한 서비스 slug를 만든다."""
+    slug = re.sub(r"[^a-z0-9._-]+", "-", name.lower()).strip("-")
+    return slug or "service"
+
+
 # ──────────────────────────────────────────────
 # 5단계 파이프라인 함수 (모두 동기)
 # ──────────────────────────────────────────────
@@ -187,35 +195,44 @@ def stage_prepare_sync(service: ServiceInfo, teams: list[TeamInfo]) -> StageResu
 
 def build_run_command(service: ServiceInfo, team: TeamInfo) -> str:
     """docker run 명령어를 구성한다. 플래그 파일은 read-only 마운트."""
-    container_name = f"cstrike-{team.team_code}-{service.name}"
+    container_name = f"cstrike-{team.team_code}-{_safe_service_slug(service.name)}"
     flag_path = f"{FLAG_BASE_DIR}/{container_name}/flag.txt"
     host_port = service.container_port
 
     env_args = ""
     if service.env_vars:
         for k, v in service.env_vars.items():
-            env_args += f" -e {k}={v}"
+            env_args += f" -e {shlex.quote(f'{k}={v}')}"
+
+    quoted_name = shlex.quote(container_name)
+    quoted_flag_path = shlex.quote(flag_path)
+    quoted_team_id = shlex.quote(team.team_id)
+    quoted_team_code = shlex.quote(team.team_code)
+    quoted_service_id = shlex.quote(service.service_id)
+    quoted_service_name = shlex.quote(service.name)
+    quoted_competition_id = shlex.quote(team.competition_id)
+    quoted_image = shlex.quote(service.docker_image)
 
     return (
         f"docker run -d"
-        f" --name {container_name}"
+        f" --name {quoted_name}"
         f" --restart unless-stopped"
         f" -p {host_port}:{service.container_port}"
-        f" -v {flag_path}:/flag.txt:ro"
+        f" -v {quoted_flag_path}:/flag.txt:ro"
         f"{env_args}"
         f" --label cstrike-service=true"
-        f" --label cstrike-team-id={team.team_id}"
-        f" --label cstrike-team-code={team.team_code}"
-        f" --label cstrike-service-id={service.service_id}"
-        f" --label cstrike-service-name={service.name}"
-        f" --label cstrike-competition-id={team.competition_id}"
-        f" {service.docker_image}"
+        f" --label cstrike-team-id={quoted_team_id}"
+        f" --label cstrike-team-code={quoted_team_code}"
+        f" --label cstrike-service-id={quoted_service_id}"
+        f" --label cstrike-service-name={quoted_service_name}"
+        f" --label cstrike-competition-id={quoted_competition_id}"
+        f" {quoted_image}"
     )
 
 
 def _deploy_to_team(service: ServiceInfo, team: TeamInfo) -> dict:
     """단일 팀 서버에 SSH로 접속하여 Docker 컨테이너를 배포한다."""
-    container_name = f"cstrike-{team.team_code}-{service.name}"
+    container_name = f"cstrike-{team.team_code}-{_safe_service_slug(service.name)}"
     host_port = service.container_port
     flag_dir = f"{FLAG_BASE_DIR}/{container_name}"
 
@@ -280,7 +297,7 @@ def stage_verify_sync(service: ServiceInfo, teams: list[TeamInfo]) -> StageResul
     total_count = len(teams)
     logs = []
     for team in teams:
-        container_name = f"cstrike-{team.team_code}-{service.name}"
+        container_name = f"cstrike-{team.team_code}-{_safe_service_slug(service.name)}"
         try:
             with SSHExecutor(team.gateway_ip, team.ssh_port, team.ssh_user, team.ssh_password) as ssh:
                 result = ssh.exec(f"docker inspect --format '{{{{.State.Status}}}}' {container_name}")

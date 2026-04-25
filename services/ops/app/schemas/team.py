@@ -1,6 +1,7 @@
 """팀(Team) 관련 Pydantic 스키마."""
 
 from datetime import datetime
+from typing import Literal
 from uuid import UUID
 
 from pydantic import BaseModel, Field
@@ -56,6 +57,17 @@ class TeamResponse(BaseModel):
     ssh_configured: bool = False
 
     model_config = {"from_attributes": True}
+
+
+class TeamSshPasswordRevealResponse(BaseModel):
+    """운영자용 SSH 비밀번호 일회성 조회 응답."""
+
+    team_id: UUID
+    team_name: str
+    ssh_user: str | None = None
+    ssh_password: str
+    revealed_at: datetime
+    message: str
 
 
 # ── 요청 스키마 ──────────────────────────────────────────
@@ -127,6 +139,25 @@ class TeamMemberListResponse(BaseModel):
     team_name: str
     items: list[TeamMemberItem]
     total: int
+
+
+class TeamMemberCreateRequest(BaseModel):
+    """운영포털에서 디스코드 멤버를 팀원으로 추가한다."""
+
+    discord_user_id: str = Field(
+        ...,
+        max_length=32,
+        pattern=r"^\d{18,20}$",
+    )
+    role: Literal["captain", "member"] = "member"
+
+
+class TeamMemberCreateResponse(TeamMemberItem):
+    """팀원 추가/재활성화 응답."""
+
+    team_id: UUID
+    team_name: str
+    message: str
 
 
 # ── 팀 서비스 ────────────────────────────────────────────

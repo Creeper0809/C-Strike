@@ -3,11 +3,12 @@
 import { useCallback, useEffect, useState } from "react";
 import * as Tabs from "@radix-ui/react-tabs";
 import * as Dialog from "@radix-ui/react-dialog";
-import { Plus, X, Trash2, Loader2, Pencil, CheckCircle2, Hammer, RotateCw, AlertTriangle } from "lucide-react";
+import { useRouter, useSearchParams } from "next/navigation";
+import { Plus, X, Trash2, Loader2, Pencil, CheckCircle2, Hammer, RotateCw, AlertTriangle, Rocket, RefreshCw } from "lucide-react";
 import { apiFetch } from "@/lib/api-client";
 import { cn } from "@/lib/utils";
-import { SERVICE_STATUS_MAP, STATUS_COLORS } from "@/lib/constants";
-import type { VulnService } from "@/types/ops";
+import { DEPLOY_STAGES, DEPLOY_STAGE_LABELS, SERVICE_STATUS_MAP, STATUS_COLORS } from "@/lib/constants";
+import type { DeployPipeline, VulnService } from "@/types/ops";
 import PageHeader from "@/components/ui/PageHeader";
 import DataTable from "@/components/ui/DataTable";
 
@@ -28,6 +29,50 @@ const CATEGORY_OPTIONS = [
 ] as const;
 
 const PAGE_SIZE = 20;
+
+interface PipelineListItem {
+  id: string;
+  service_id: string;
+  triggered_by: string;
+  triggered_by_name: string | null;
+  service_name: string | null;
+  status: string;
+  current_stage: string | null;
+  started_at: string | null;
+  completed_at: string | null;
+  created_at: string | null;
+}
+
+const DEPLOY_STATUS_MAP: Record<
+  string,
+  { label: string; color: string; bg: string }
+> = {
+  pending: {
+    label: "대기",
+    color: "text-status-neutral",
+    bg: "bg-status-neutral/10",
+  },
+  running: {
+    label: "실행 중",
+    color: "text-status-info",
+    bg: "bg-status-info/10",
+  },
+  success: {
+    label: "성공",
+    color: "text-status-ok",
+    bg: "bg-status-ok/10",
+  },
+  failed: {
+    label: "실패",
+    color: "text-status-danger",
+    bg: "bg-status-danger/10",
+  },
+  rolled_back: {
+    label: "롤백됨",
+    color: "text-status-warning",
+    bg: "bg-status-warning/10",
+  },
+};
 
 /* ─── 상태 뱃지 컴포넌트 ──────────────────────────────── */
 
@@ -69,6 +114,33 @@ function formatDate(iso: string): string {
     month: "2-digit",
     day: "2-digit",
   });
+}
+
+function formatDateTime(iso: string | null): string {
+  if (!iso) return "-";
+  const d = new Date(iso);
+  return d.toLocaleString("ko-KR", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  });
+}
+
+function DeployStatusBadge({ status }: { status: string }) {
+  const mapped = DEPLOY_STATUS_MAP[status] ?? DEPLOY_STATUS_MAP.pending;
+  return (
+    <span
+      className={cn(
+        "inline-flex px-2 py-0.5 rounded-full text-xs font-medium",
+        mapped.color,
+        mapped.bg,
+      )}
+    >
+      {mapped.label}
+    </span>
+  );
 }
 
 /* ─── 테이블 컬럼 정의 ────────────────────────────────── */
@@ -147,11 +219,19 @@ interface ToastItem {
 /* ─── 메인 페이지 ─────────────────────────────────────── */
 
 export default function ServicesPage() {
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  const initialStatus =
+    STATUS_FILTER_TABS.some((tab) => tab.value === searchParams.get("status"))
+      ? searchParams.get("status") ?? "all"
+      : "all";
+  const initialPage = Math.max(1, Number(searchParams.get("page") ?? "1") || 1);
+
   /* 서비스 목록 */
   const [services, setServices] = useState<VulnService[]>([]);
   const [total, setTotal] = useState(0);
-  const [page, setPage] = useState(1);
-  const [statusFilter, setStatusFilter] = useState("all");
+  const [page, setPage] = useState(initialPage);
+  const [statusFilter, setStatusFilter] = useState(initialStatus);
   const [isLoading, setIsLoading] = useState(true);
 
   /* 상세 패널 */
@@ -196,6 +276,14 @@ export default function ServicesPage() {
 
   /* 액션 로딩 */
   const [actionLoading, setActionLoading] = useState<string | null>(null);
+
+  /* 배포 이력/상세 */
+  const [deployPipelines, setDeployPipelines] = useState<PipelineListItem[]>([]);
+  const [selectedPipelineId, setSelectedPipelineId] = useState<string | null>(null);
+  const [selectedPipeline, setSelectedPipeline] = useState<DeployPipeline | null>(null);
+  const [selectedDeployStage, setSelectedDeployStage] = useState<string | null>(null);
+  const [isDeployLoading, setIsDeployLoading] = useState(false);
+  const [showDeployHistory, setShowDeployHistory] = useState(false);
 
   /* 편집 모달 */
   const [editOpen, setEditOpen] = useState(false);
@@ -257,12 +345,41 @@ export default function ServicesPage() {
     fetchCompetitions();
   }, [fetchCompetitions]);
 
+  useEffect(() => {
+    const nextStatus =
+      STATUS_FILTER_TABS.some((tab) => tab.value === searchParams.get("status"))
+        ? searchParams.get("status") ?? "all"
+        : "all";
+    const nextPage = Math.max(1, Number(searchParams.get("page") ?? "1") || 1);
+    setStatusFilter(nextStatus);
+    setPage(nextPage);
+  }, [searchParams]);
+
+  function syncListQuery(nextPage: number, nextStatus: string) {
+    const params = new URLSearchParams(searchParams.toString());
+    if (nextStatus === "all") {
+      params.delete("status");
+    } else {
+      params.set("status", nextStatus);
+    }
+
+    if (nextPage <= 1) {
+      params.delete("page");
+    } else {
+      params.set("page", String(nextPage));
+    }
+
+    const query = params.toString();
+    router.replace(query ? `/services?${query}` : "/services");
+  }
+
   /* ── 탭 전환 ─────────────────────────────────────────── */
 
   function handleTabChange(value: string) {
     setStatusFilter(value);
     setPage(1);
     setSelected(null);
+    syncListQuery(1, value);
   }
 
   /* ── 등록 제출 ───────────────────────────────────────── */
@@ -271,7 +388,7 @@ export default function ServicesPage() {
     if (!form.name.trim()) return;
     if (form.env_type === "image" && !form.docker_image.trim()) return;
     if (!form.competition_id) {
-      alert("서비스를 등록할 대회를 선택해 주세요. 대회가 없으면 먼저 대회를 생성하세요.");
+      alert("문제를 등록할 대회를 선택해 주세요. 대회가 없으면 먼저 운영용 대회를 준비하세요.");
       return;
     }
 
@@ -507,6 +624,24 @@ export default function ServicesPage() {
     }
   }
 
+  async function handleDeploy(id: string, serviceName: string) {
+    setActionLoading("deploy");
+    try {
+      await apiFetch("/deploy/pipelines", {
+        method: "POST",
+        body: JSON.stringify({ service_id: id }),
+      });
+      addToast(`"${serviceName}" 배포를 시작했습니다.`, "success");
+      await fetchDeployPipelines(id);
+    } catch (err) {
+      const message =
+        err instanceof Error ? err.message : "알 수 없는 오류";
+      addToast(`"${serviceName}" 배포 실패: ${message}`, "error");
+    } finally {
+      setActionLoading(null);
+    }
+  }
+
   /* ── 서비스 액션 (삭제) ──────────────────────────────── */
 
   async function handleDelete(id: string) {
@@ -520,11 +655,88 @@ export default function ServicesPage() {
     }
   }
 
+  const fetchDeployPipelines = useCallback(async (serviceId: string) => {
+    setIsDeployLoading(true);
+    try {
+      const data = await apiFetch<{ items: PipelineListItem[]; total: number }>(
+        `/deploy/pipelines?service_id=${serviceId}&page=1&limit=5`,
+      );
+      const items = data.items ?? [];
+      setDeployPipelines(items);
+      setSelectedPipelineId((prev) =>
+        prev && items.some((item) => item.id === prev) ? prev : (items[0]?.id ?? null),
+      );
+    } catch {
+      setDeployPipelines([]);
+      setSelectedPipelineId(null);
+      setSelectedPipeline(null);
+      setSelectedDeployStage(null);
+    } finally {
+      setIsDeployLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!selected?.id) {
+      setDeployPipelines([]);
+      setSelectedPipelineId(null);
+      setSelectedPipeline(null);
+      setSelectedDeployStage(null);
+      setShowDeployHistory(false);
+      return;
+    }
+    setShowDeployHistory(false);
+    fetchDeployPipelines(selected.id);
+  }, [selected?.id, fetchDeployPipelines]);
+
+  useEffect(() => {
+    if (!selectedPipelineId) {
+      setSelectedPipeline(null);
+      setSelectedDeployStage(null);
+      return;
+    }
+
+    let cancelled = false;
+
+    async function loadPipelineDetail() {
+      setIsDeployLoading(true);
+      try {
+        const detail = await apiFetch<DeployPipeline>(
+          `/deploy/pipelines/${selectedPipelineId}`,
+        );
+        if (cancelled) return;
+        setSelectedPipeline(detail);
+        setSelectedDeployStage(
+          detail.current_stage ?? detail.stages[0]?.stage_name ?? null,
+        );
+      } catch {
+        if (cancelled) return;
+        setSelectedPipeline(null);
+        setSelectedDeployStage(null);
+      } finally {
+        if (!cancelled) setIsDeployLoading(false);
+      }
+    }
+
+    loadPipelineDetail();
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedPipelineId]);
+
   /* ── 페이지네이션 ────────────────────────────────────── */
 
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
   const canPrev = page > 1;
   const canNext = page < totalPages;
+  const selectedDeployStageDetail =
+    selectedPipeline && selectedDeployStage
+      ? selectedPipeline.stages.find((stage) => stage.stage_name === selectedDeployStage) ?? null
+      : null;
+  const latestPipeline = deployPipelines[0] ?? null;
+  const historyPipelines = latestPipeline
+    ? deployPipelines.filter((pipeline) => pipeline.id !== latestPipeline.id)
+    : [];
 
   /* ── 렌더링 ──────────────────────────────────────────── */
 
@@ -532,8 +744,8 @@ export default function ServicesPage() {
     <div className="space-y-6">
       {/* 헤더 */}
       <PageHeader
-        title="취약 서비스 관리"
-        description={`총 ${total}개 서비스`}
+        title="문제 관리"
+        description={`총 ${total}개 문제 | 문제 하나에 여러 취약점을 포함할 수 있습니다.`}
         actions={
           <button
             type="button"
@@ -574,9 +786,12 @@ export default function ServicesPage() {
             columns={SERVICE_COLUMNS}
             data={services}
             keyExtractor={(row) => row.id}
-            onRowClick={(row) => setSelected(row)}
+            onRowClick={(row) => {
+              const query = searchParams.toString();
+              router.push(`/services/${row.id}${query ? `?${query}` : ""}`);
+            }}
             isLoading={isLoading}
-            emptyMessage="등록된 서비스가 없습니다"
+            emptyMessage="등록된 문제가 없습니다"
           />
 
           {/* 페이지네이션 */}
@@ -585,7 +800,11 @@ export default function ServicesPage() {
               <button
                 type="button"
                 disabled={!canPrev}
-                onClick={() => setPage((p) => p - 1)}
+                onClick={() => {
+                  const nextPage = page - 1;
+                  setPage(nextPage);
+                  syncListQuery(nextPage, statusFilter);
+                }}
                 className={cn(
                   "px-3 py-1.5 text-sm rounded-lg transition-colors",
                   canPrev
@@ -601,7 +820,11 @@ export default function ServicesPage() {
               <button
                 type="button"
                 disabled={!canNext}
-                onClick={() => setPage((p) => p + 1)}
+                onClick={() => {
+                  const nextPage = page + 1;
+                  setPage(nextPage);
+                  syncListQuery(nextPage, statusFilter);
+                }}
                 className={cn(
                   "px-3 py-1.5 text-sm rounded-lg transition-colors",
                   canNext
@@ -658,7 +881,7 @@ export default function ServicesPage() {
                 </div>
                 {competitions.length === 0 ? (
                   <div className="text-xs text-text-muted py-1">
-                    등록된 대회가 없습니다. 대회 관리에서 먼저 생성하세요.
+                    등록된 대회가 없습니다. 먼저 운영용 대회를 준비하세요.
                   </div>
                 ) : (
                   <select
@@ -722,6 +945,219 @@ export default function ServicesPage() {
                   </div>
                 </div>
               )}
+
+              <div className="py-2 border-t border-border/50 space-y-3">
+                <div className="flex items-center justify-between">
+                  <span className="text-text-muted text-xs uppercase tracking-wider">
+                    배포 현황
+                  </span>
+                  {selected.competition_id && (
+                    <button
+                      type="button"
+                      onClick={() => fetchDeployPipelines(selected.id)}
+                      disabled={isDeployLoading}
+                      className="inline-flex items-center gap-1 text-xs text-text-muted hover:text-text-primary transition-colors disabled:opacity-50"
+                    >
+                      <RefreshCw className={cn("w-3 h-3", isDeployLoading && "animate-spin")} />
+                      새로고침
+                    </button>
+                  )}
+                </div>
+
+                {!selected.competition_id ? (
+                  <p className="text-xs text-text-muted">
+                    귀속 대회를 지정해야 배포 이력과 현재 상태를 확인할 수 있습니다.
+                  </p>
+                ) : isDeployLoading && deployPipelines.length === 0 ? (
+                  <div className="flex items-center gap-2 text-xs text-text-muted">
+                    <Loader2 className="w-3 h-3 animate-spin" />
+                    배포 이력을 불러오는 중...
+                  </div>
+                ) : deployPipelines.length === 0 ? (
+                  <p className="text-xs text-text-muted">
+                    아직 배포 이력이 없습니다. 활성 문제라면 아래에서 바로 배포를 시작할 수 있습니다.
+                  </p>
+                ) : (
+                  <div className="space-y-3">
+                    {latestPipeline && (
+                      <div className="rounded-lg border border-border bg-bg-tertiary p-3 space-y-3">
+                        <div className="flex items-start justify-between gap-3">
+                          <div>
+                            <p className="text-sm font-semibold text-text-primary">
+                              {selectedPipeline?.id === latestPipeline.id ? "최근 배포" : "선택한 배포"}
+                            </p>
+                            <p className="text-[11px] font-mono text-text-muted">
+                              {selectedPipeline?.id ?? latestPipeline.id}
+                            </p>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            {selectedPipeline?.id !== latestPipeline.id && (
+                              <button
+                                type="button"
+                                onClick={() => setSelectedPipelineId(latestPipeline.id)}
+                                className="text-xs text-accent hover:underline"
+                              >
+                                최신으로 돌아가기
+                              </button>
+                            )}
+                            <DeployStatusBadge status={selectedPipeline?.status ?? latestPipeline.status} />
+                          </div>
+                        </div>
+
+                        {selectedPipeline && (
+                          <>
+                            <div className="space-y-1">
+                              <DetailRow
+                                label="현재 단계"
+                                value={
+                                  selectedPipeline.current_stage
+                                    ? (DEPLOY_STAGE_LABELS[selectedPipeline.current_stage] ?? selectedPipeline.current_stage)
+                                    : "-"
+                                }
+                              />
+                              <DetailRow label="시작" value={formatDateTime(selectedPipeline.started_at)} />
+                              <DetailRow label="완료" value={formatDateTime(selectedPipeline.completed_at)} />
+                              <DetailRow
+                                label="실행자"
+                                value={selectedPipeline.triggered_by_name ?? selectedPipeline.triggered_by}
+                              />
+                            </div>
+
+                            {selectedPipeline.error_detail && (
+                              <div className="rounded-lg border border-status-danger/30 bg-status-danger/10 px-3 py-2 text-xs text-status-danger whitespace-pre-wrap break-words">
+                                {selectedPipeline.error_detail}
+                              </div>
+                            )}
+
+                            <div className="space-y-2">
+                              <span className="text-text-muted text-xs uppercase tracking-wider">
+                                파이프라인 단계
+                              </span>
+                              <div className="grid gap-2">
+                                {DEPLOY_STAGES.map((stageName) => {
+                                  const stage =
+                                    selectedPipeline.stages.find((item) => item.stage_name === stageName) ?? null;
+                                  const stageStatus = stage?.status ?? "pending";
+                                  return (
+                                    <button
+                                      key={stageName}
+                                      type="button"
+                                      onClick={() => setSelectedDeployStage(stageName)}
+                                      className={cn(
+                                        "rounded-lg border px-3 py-2 text-left transition-colors",
+                                        selectedDeployStage === stageName
+                                          ? "border-accent bg-accent/10"
+                                          : "border-border bg-bg-secondary hover:border-accent/40",
+                                      )}
+                                    >
+                                      <div className="flex items-center justify-between gap-3">
+                                        <span className="text-sm text-text-primary">
+                                          {DEPLOY_STAGE_LABELS[stageName] ?? stageName}
+                                        </span>
+                                        <DeployStatusBadge status={stageStatus} />
+                                      </div>
+                                      <div className="mt-1 text-[11px] text-text-muted font-mono">
+                                        {stage?.started_at
+                                          ? `${formatDateTime(stage.started_at)}${
+                                              stage?.completed_at ? ` -> ${formatDateTime(stage.completed_at)}` : ""
+                                            }`
+                                          : "아직 실행되지 않음"}
+                                      </div>
+                                    </button>
+                                  );
+                                })}
+                              </div>
+                            </div>
+
+                            {selectedDeployStage && (
+                              <div className="space-y-2 rounded-lg border border-border bg-bg-secondary p-3">
+                                <div className="flex items-center justify-between gap-3">
+                                  <span className="text-sm font-medium text-text-primary">
+                                    {DEPLOY_STAGE_LABELS[selectedDeployStage] ?? selectedDeployStage}
+                                  </span>
+                                  <DeployStatusBadge
+                                    status={selectedDeployStageDetail?.status ?? "pending"}
+                                  />
+                                </div>
+                                <div className="space-y-1">
+                                  <DetailRow
+                                    label="시작"
+                                    value={formatDateTime(selectedDeployStageDetail?.started_at ?? null)}
+                                  />
+                                  <DetailRow
+                                    label="완료"
+                                    value={formatDateTime(selectedDeployStageDetail?.completed_at ?? null)}
+                                  />
+                                </div>
+                                <pre className="max-h-48 overflow-auto rounded-lg bg-bg-primary px-3 py-2 text-[11px] text-text-secondary whitespace-pre-wrap break-words">
+{selectedDeployStageDetail?.log_output
+  || selectedDeployStageDetail?.error_detail
+  || "기록된 로그가 없습니다."}
+                                </pre>
+                              </div>
+                            )}
+                          </>
+                        )}
+                      </div>
+                    )}
+
+                    {historyPipelines.length > 0 && (
+                      <div className="space-y-2">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setShowDeployHistory((prev) => {
+                              const next = !prev;
+                              if (!next && latestPipeline) {
+                                setSelectedPipelineId(latestPipeline.id);
+                              }
+                              return next;
+                            });
+                          }}
+                          className="text-xs text-text-muted hover:text-text-primary transition-colors"
+                        >
+                          {showDeployHistory
+                            ? `이전 이력 숨기기`
+                            : `이전 이력 ${historyPipelines.length}건 보기`}
+                        </button>
+
+                        {showDeployHistory && (
+                          <div className="flex flex-wrap gap-2">
+                            {historyPipelines.map((pipeline) => (
+                              <button
+                                key={pipeline.id}
+                                type="button"
+                                onClick={() => setSelectedPipelineId(pipeline.id)}
+                                className={cn(
+                                  "rounded-lg border px-2.5 py-2 text-left transition-colors",
+                                  selectedPipelineId === pipeline.id
+                                    ? "border-accent bg-accent/10"
+                                    : "border-border bg-bg-tertiary hover:border-accent/40",
+                                )}
+                              >
+                                <div className="flex items-center gap-2">
+                                  <DeployStatusBadge status={pipeline.status} />
+                                  <span className="text-[11px] font-mono text-text-muted">
+                                    {pipeline.id.slice(0, 8)}
+                                  </span>
+                                </div>
+                                <div className="mt-1 text-[11px] text-text-secondary">
+                                  {pipeline.current_stage
+                                    ? DEPLOY_STAGE_LABELS[pipeline.current_stage] ?? pipeline.current_stage
+                                    : "단계 정보 없음"}
+                                </div>
+                                <div className="mt-0.5 text-[11px] text-text-muted font-mono">
+                                  {formatDateTime(pipeline.started_at ?? pipeline.created_at)}
+                                </div>
+                              </button>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
             </div>
 
             {/* 액션 버튼 — draft 상태: 수정/(이미지 모드 활성화)/삭제 */}
@@ -734,7 +1170,7 @@ export default function ServicesPage() {
                   className="w-full inline-flex items-center justify-center gap-1.5 px-3 py-2 text-sm font-medium rounded-lg bg-accent/15 text-accent hover:bg-accent/25 transition-colors disabled:opacity-50"
                 >
                   <Pencil className="w-4 h-4" />
-                  서비스 수정
+                  문제 수정
                 </button>
                 {selected.env_type === "image" && (
                   <button
@@ -793,7 +1229,7 @@ export default function ServicesPage() {
                   ) : (
                     <Trash2 className="w-4 h-4" />
                   )}
-                  서비스 삭제
+                  문제 삭제
                 </button>
               </div>
             )}
@@ -801,6 +1237,19 @@ export default function ServicesPage() {
             {/* 액션 버튼 — active 상태: 재빌드/삭제 */}
             {selected.status === "active" && (
               <div className="space-y-2 pt-2 border-t border-border">
+                <button
+                  type="button"
+                  onClick={() => handleDeploy(selected.id, selected.name)}
+                  disabled={actionLoading !== null || !selected.competition_id}
+                  className="w-full inline-flex items-center justify-center gap-1.5 px-3 py-2 text-sm font-medium rounded-lg bg-status-info/15 text-status-info hover:bg-status-info/25 transition-colors disabled:opacity-50"
+                >
+                  {actionLoading === "deploy" ? (
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                  ) : (
+                    <Rocket className="w-4 h-4" />
+                  )}
+                  배포 시작
+                </button>
                 {selected.env_type === "dockerfile" && (
                   <button
                     type="button"
@@ -820,7 +1269,7 @@ export default function ServicesPage() {
                   type="button"
                   onClick={() => {
                     const ok = window.confirm(
-                      `"${selected.name}" 서비스를 완전히 삭제합니다.\n\n다음이 함께 정리됩니다:\n- 모든 팀의 배포된 컨테이너 (정지/삭제)\n- 할당된 호스트 포트 해제\n- Dockerfile 모드 빌드 이미지 제거\n- 관련 플래그/SLA/팀 서비스 레코드\n\n이 작업은 되돌릴 수 없습니다. 계속하시겠습니까?`,
+                      `"${selected.name}" 문제를 완전히 삭제합니다.\n\n다음이 함께 정리됩니다:\n- 모든 팀의 배포된 컨테이너 (정지/삭제)\n- 할당된 호스트 포트 해제\n- Dockerfile 모드 빌드 이미지 제거\n- 관련 플래그/SLA/팀 서비스 레코드\n\n이 작업은 되돌릴 수 없습니다. 계속하시겠습니까?`,
                     );
                     if (ok) handleDelete(selected.id);
                   }}
@@ -832,7 +1281,7 @@ export default function ServicesPage() {
                   ) : (
                     <Trash2 className="w-4 h-4" />
                   )}
-                  서비스 삭제
+                  문제 삭제
                 </button>
               </div>
             )}
@@ -861,10 +1310,10 @@ export default function ServicesPage() {
               </Dialog.Close>
 
               <Dialog.Title className="text-lg font-semibold text-text-primary pr-8">
-                취약 서비스 등록
+                문제 등록
               </Dialog.Title>
               <Dialog.Description className="mt-1 text-sm text-text-secondary">
-                새로운 취약 서비스를 등록합니다. Dockerfile 모드는 빌드 성공 시 자동으로 활성화됩니다.
+                하나의 문제 안에 여러 취약점을 포함할 수 있습니다. Dockerfile 모드는 빌드 성공 시 자동으로 활성화됩니다.
               </Dialog.Description>
             </div>
 
@@ -878,7 +1327,7 @@ export default function ServicesPage() {
             >
               <div className="px-6 pt-5 pb-4 space-y-4 overflow-y-auto flex-1">
               {/* 이름 */}
-              <FormField label="서비스 이름" required>
+              <FormField label="문제 이름" required>
                 <input
                   type="text"
                   value={form.name}
@@ -936,7 +1385,7 @@ export default function ServicesPage() {
               <FormField label="귀속 대회" required>
                 {competitions.length === 0 ? (
                   <div className="form-input text-text-muted text-sm">
-                    등록된 대회가 없습니다. 먼저 대회 관리에서 대회를 생성하세요.
+                    등록된 대회가 없습니다. 먼저 운영용 대회를 준비하세요.
                   </div>
                 ) : (
                   <select
@@ -955,7 +1404,7 @@ export default function ServicesPage() {
                   </select>
                 )}
                 <p className="text-xs text-text-muted mt-1">
-                  이 서비스가 어느 대회에서 운영되는지 지정합니다. 배포는 해당 대회의 승인된 팀에만 이뤄집니다.
+                  이 문제가 어느 대회에서 운영되는지 지정합니다. 배포는 해당 대회의 승인된 팀에만 이뤄집니다.
                 </p>
               </FormField>
 
@@ -1209,7 +1658,7 @@ export default function ServicesPage() {
                   onChange={(e) =>
                     setForm({ ...form, description: e.target.value })
                   }
-                  placeholder="서비스에 대한 간단한 설명"
+                  placeholder="문제에 대한 간단한 설명"
                   rows={3}
                   className="form-input resize-none"
                 />
@@ -1267,7 +1716,7 @@ export default function ServicesPage() {
               </Dialog.Close>
 
               <Dialog.Title className="text-lg font-semibold text-text-primary pr-8">
-                취약 서비스 수정
+                문제 수정
               </Dialog.Title>
               <Dialog.Description className="mt-1 text-sm text-text-secondary">
                 draft 상태에서만 수정할 수 있습니다. 저장 시 즉시 반영됩니다.
@@ -1280,7 +1729,7 @@ export default function ServicesPage() {
                 className="flex flex-col flex-1 min-h-0"
               >
                 <div className="px-6 pt-5 pb-4 space-y-4 overflow-y-auto flex-1">
-                  <FormField label="서비스 이름" required>
+                  <FormField label="문제 이름" required>
                     <input
                       type="text"
                       className="form-input"

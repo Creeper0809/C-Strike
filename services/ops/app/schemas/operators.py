@@ -24,7 +24,7 @@ class OperatorCreateRequest(BaseModel):
         pattern=_DISCORD_ID_REGEX,
         description="Discord 사용자 ID (18~20자리 숫자 문자열). 운영진 역할 자동 부여 대상.",
     )
-    display_name: str = Field(..., min_length=1, max_length=100)
+    display_name: str | None = Field(default=None, min_length=1, max_length=100)
     role: Literal["admin", "operator"] = "operator"
     username: str | None = Field(
         default=None,

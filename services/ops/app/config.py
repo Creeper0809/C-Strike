@@ -52,6 +52,9 @@ class Settings(BaseSettings):
     # SSH 비밀번호 암호화 키 (Fernet, 32바이트 base64)
     SSH_ENCRYPTION_KEY: str = "your-fernet-key-change-in-production"
 
+    # 운영 포털 팀 생성 시 사용할 사전 준비 슬롯 풀(JSON 배열)
+    TEAM_SLOT_POOL_JSON: str = ""
+
     model_config = {"env_file": ".env"}
 
 

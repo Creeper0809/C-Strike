@@ -22,6 +22,7 @@ from app.api import teams, flags, feedbacks, network, scoreboard_public, competi
 from app.api import bot_api
 from app.api import cguard
 from app.api import discord_bot_admin
+from app.api import discord_directory
 from app.api import internal
 from app.api import operators as operators_api
 
@@ -223,6 +224,7 @@ app.include_router(scoreboard_public.router, prefix="/api/v1/scoreboard")
 app.include_router(bot_api.router, prefix="/api/v1/bot")
 app.include_router(cguard.router, prefix="/api/cguard")
 app.include_router(discord_bot_admin.router, prefix="/api/discord-bot", tags=["discord-bot"])
+app.include_router(discord_directory.router, prefix="/api/discord-directory", tags=["discord-directory"])
 app.include_router(operators_api.router, prefix="/api/operators", tags=["operators"])
 app.include_router(internal.router)
 

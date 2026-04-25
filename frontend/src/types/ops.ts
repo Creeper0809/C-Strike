@@ -11,7 +11,7 @@ export interface Operator {
 
 export interface OperatorCreatePayload {
   discord_user_id: string;
-  display_name: string;
+  display_name?: string;
   role: "admin" | "operator";
   username?: string;
   password?: string;
@@ -148,6 +148,8 @@ export interface DashboardStats {
   scoring_round: number;
   open_tickets: number;
   current_vulnpack: number;
+  total_containers: number;
+  running_containers: number;
   system_health: Record<string, "ok" | "degraded" | "down" | "not_connected" | "unknown">;
 }
 
@@ -226,6 +228,40 @@ export type TeamStatus = "pending" | "approved" | "active" | "disqualified" | "w
 export type TeamMemberRole = "captain" | "member";
 export type TeamMemberStatus = "pending" | "approved" | "rejected" | "left" | "kicked";
 
+export interface DiscordDirectoryMemberItem {
+  discord_user_id: string;
+  username: string;
+  display_name: string;
+  global_name: string | null;
+  nick: string | null;
+  is_bot: boolean;
+  is_in_guild: boolean;
+  synced_at: string;
+  is_operator: boolean;
+  operator_id: string | null;
+  operator_role: "admin" | "operator" | null;
+  assigned_team_id: string | null;
+  assigned_team_name: string | null;
+  assigned_team_status: TeamStatus | null;
+  assigned_member_role: TeamMemberRole | null;
+  is_current_team_member: boolean;
+}
+
+export interface DiscordDirectoryMemberListResponse {
+  items: DiscordDirectoryMemberItem[];
+  total: number;
+}
+
+export interface DiscordDirectorySyncResponse {
+  guild_id: string;
+  total_members: number;
+  created: number;
+  updated: number;
+  marked_left: number;
+  synced_at: string;
+  message: string;
+}
+
 export interface TeamListItem {
   id: string;
   competition_id: string;
@@ -269,6 +305,15 @@ export interface TeamDetail {
   ssh_configured: boolean;
 }
 
+export interface TeamSshPasswordRevealResponse {
+  team_id: string;
+  team_name: string;
+  ssh_user: string | null;
+  ssh_password: string;
+  revealed_at: string;
+  message: string;
+}
+
 export interface TeamMemberItem {
   id: string;
   discord_user_id: string;
@@ -276,6 +321,17 @@ export interface TeamMemberItem {
   role: TeamMemberRole;
   status: TeamMemberStatus;
   joined_at: string | null;
+}
+
+export interface TeamMemberCreatePayload {
+  discord_user_id: string;
+  role: TeamMemberRole;
+}
+
+export interface TeamMemberCreateResponse extends TeamMemberItem {
+  team_id: string;
+  team_name: string;
+  message: string;
 }
 
 export interface TeamServiceItem {

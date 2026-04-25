@@ -6,6 +6,7 @@ Alembic 마이그레이션 및 앱 초기화 시 이 모듈을 통해 모든 테
 from app.models.audit import OpsAuditLog
 from app.models.competition import Competition
 from app.models.config import CompetitionConfig
+from app.models.discord_member import DiscordGuildMember
 from app.models.deploy import DeployPipeline, DeployStage
 from app.models.emergency import EmergencyAction
 from app.models.feedback import Feedback
@@ -23,6 +24,7 @@ from app.models.vulnpack import VulnpackSchedule
 __all__ = [
     "Competition",
     "CompetitionConfig",
+    "DiscordGuildMember",
     "DeployPipeline",
     "DeployStage",
     "EmergencyAction",

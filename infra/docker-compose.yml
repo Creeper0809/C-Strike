@@ -220,6 +220,15 @@ services:
       context: ../services/discord_bot
       dockerfile: Dockerfile
     container_name: cstrike-discord-bot
+    command:
+      - /bin/sh
+      - -lc
+      - |
+        if [ -z "$DISCORD_TOKEN" ] || [ "$DISCORD_TOKEN" = "placeholder-discord-token" ]; then
+          echo "[discord-bot] DISCORD_TOKEN not configured; container will stay idle."
+          exec tail -f /dev/null
+        fi
+        exec python -m ops_bot
     env_file:
       - ../.env
     environment:

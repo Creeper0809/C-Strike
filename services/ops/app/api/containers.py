@@ -50,6 +50,26 @@ async def list_containers(
     return await _deploy_request("get", "/containers")
 
 
+@router.post("/teams/{team_id}/services/{service_id}/reset")
+async def reset_team_service_container(
+    team_id: str,
+    service_id: str,
+    body: ContainerActionRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_operator: Operator = Depends(get_current_operator),
+):
+    """특정 팀의 특정 서비스 컨테이너를 리셋한다."""
+    result = await _deploy_request("post", f"/containers/reset/{team_id}/{service_id}")
+    await record_audit(
+        db, current_operator, "ops.container.reset",
+        details={"team_id": team_id, "service_id": service_id, "reason": body.reason},
+        ip_address=request.client.host if request.client else None,
+    )
+    await db.commit()
+    return result
+
+
 @router.get("/{team_id}")
 async def get_team_containers(
     team_id: str,

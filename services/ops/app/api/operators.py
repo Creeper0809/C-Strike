@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import get_current_operator, require_role
 from app.database import get_db
 from app.external import discord_client
+from app.models.discord_member import DiscordGuildMember
 from app.models.operator import Operator
 from app.schemas.operators import (
     OperatorCreateRequest,
@@ -101,6 +102,20 @@ async def _resolve_unique_username(db: AsyncSession, base: str) -> str:
     )
 
 
+def _preferred_discord_display_name(member: DiscordGuildMember) -> str:
+    for candidate in (
+        member.display_name,
+        member.nick,
+        member.global_name,
+        member.username,
+        member.discord_user_id,
+    ):
+        normalized = str(candidate or "").strip()
+        if normalized:
+            return normalized
+    return "unknown"
+
+
 # ── 엔드포인트 ───────────────────────────────────────────
 
 @router.get("")
@@ -133,6 +148,15 @@ async def create_operator(
     discord_user_id는 필수 — 생성 후 Discord 봇에 '운영진' 역할 부여를 요청한다.
     봇 호출 실패 시 경고 로그만 남기고 DB 생성은 계속 진행한다.
     """
+    duplicate_discord = await db.execute(
+        select(Operator.id).where(Operator.discord_user_id == body.discord_user_id)
+    )
+    if duplicate_discord.scalar_one_or_none() is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="해당 Discord 사용자는 이미 운영자로 등록되어 있습니다.",
+        )
+
     # username 결정: 제공된 값 우선, 없으면 'op_{discord_user_id}' 기본 + 중복 시 suffix
     if body.username is not None:
         requested = body.username.strip()
@@ -150,6 +174,29 @@ async def create_operator(
             db, base=f"op_{body.discord_user_id}"
         )
 
+    if body.display_name is not None and body.display_name.strip():
+        final_display_name = body.display_name.strip()
+    else:
+        directory_member = (
+            await db.execute(
+                select(DiscordGuildMember).where(
+                    DiscordGuildMember.discord_user_id == body.discord_user_id,
+                    DiscordGuildMember.is_in_guild.is_(True),
+                )
+            )
+        ).scalar_one_or_none()
+        if directory_member is None:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="해당 Discord 사용자를 디렉터리에서 찾을 수 없습니다. 먼저 멤버 동기화를 실행하세요.",
+            )
+        if directory_member.is_bot:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="봇 계정은 운영자로 승격할 수 없습니다.",
+            )
+        final_display_name = _preferred_discord_display_name(directory_member)
+
     # password 결정: 제공되면 그대로, 없으면 랜덤 생성 (응답에 1회 반환)
     generated_password: str | None = None
     if body.password is not None:
@@ -161,7 +208,7 @@ async def create_operator(
     new_op = Operator(
         username=final_username,
         password_hash=hash_password(plain_password),
-        display_name=body.display_name,
+        display_name=final_display_name,
         role=body.role,
         is_active=True,
         discord_user_id=body.discord_user_id,
@@ -252,6 +299,18 @@ async def update_operator(
         new_discord_id = update_data["discord_user_id"] or None  # "" → None
         update_data["discord_user_id"] = new_discord_id
         discord_changed = new_discord_id != old_discord_id
+        if new_discord_id is not None:
+            duplicate_discord = await db.execute(
+                select(Operator.id).where(
+                    Operator.discord_user_id == new_discord_id,
+                    Operator.id != target.id,
+                )
+            )
+            if duplicate_discord.scalar_one_or_none() is not None:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="해당 Discord 사용자는 이미 다른 운영자에 연결되어 있습니다.",
+                )
 
     # 비활성화 전환 여부 (is_active=False 이면서 discord_user_id가 존재하는 경우 revoke 필요)
     deactivating = (

@@ -6,6 +6,7 @@ RUN npm ci
 
 FROM node:24-alpine AS builder
 WORKDIR /app
+ENV NODE_OPTIONS=--max-old-space-size=512
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 RUN npm run build

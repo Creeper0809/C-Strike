@@ -2,6 +2,7 @@
 import asyncio
 import json
 import os
+import socket
 import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -90,6 +91,19 @@ def _get_docker_client() -> docker.DockerClient:
 
 def _get_redis_client() -> redis.Redis:
     return redis.from_url(settings.REDIS_URL)
+
+
+def _get_current_container_network(docker_client: docker.DockerClient) -> str | None:
+    """현재 deploy-service 컨테이너가 붙어 있는 첫 Docker 네트워크를 반환한다."""
+    try:
+        container_id = socket.gethostname()
+        current = docker_client.containers.get(container_id)
+        networks = current.attrs.get("NetworkSettings", {}).get("Networks") or {}
+        for network_name in networks:
+            return network_name
+    except Exception:
+        return None
+    return None
 
 
 def _build_image_sync(service_id: str) -> dict:
@@ -238,13 +252,23 @@ def _validate_image_sync(
         except docker.errors.ImageNotFound:
             image = docker_client.images.pull(docker_image)
 
-        # 2) 테스트 컨테이너 생성 (랜덤 호스트 포트 바인딩)
+        # 2) 테스트 컨테이너 생성
+        # deploy-service도 컨테이너 내부에서 동작하므로 host localhost를 바로 찌르면
+        # 테스트 컨테이너에 닿지 않는 경우가 있다. 가능하면 deploy-service와 같은
+        # Docker 네트워크에 테스트 컨테이너를 붙이고 컨테이너 IP로 검사한다.
+        current_network = _get_current_container_network(docker_client)
+        run_kwargs = {
+            "detach": True,
+            "ports": {f"{container_port}/tcp": None},
+            "labels": {"cstrike-validate": "true"},
+            "name": f"cstrike-validate-{int(time.time())}",
+        }
+        if current_network:
+            run_kwargs["network"] = current_network
+
         test_container = docker_client.containers.run(
             docker_image,
-            detach=True,
-            ports={f"{container_port}/tcp": None},
-            labels={"cstrike-validate": "true"},
-            name=f"cstrike-validate-{int(time.time())}",
+            **run_kwargs,
         )
 
         # 3) 컨테이너 running 상태 대기 (최대 30초)
@@ -265,25 +289,34 @@ def _validate_image_sync(
                 "detected_health_endpoint": None,
             }
 
-        # 4) 포트 매핑 확인
+        # 4) 접속 대상 결정
         test_container.reload()
-        port_bindings = test_container.attrs["NetworkSettings"]["Ports"]
-        port_key = f"{container_port}/tcp"
-        if not port_bindings or port_key not in port_bindings or not port_bindings[port_key]:
-            return {
-                "valid": False,
-                "image_id": image.id,
-                "image_size_mb": round(image.attrs["Size"] / (1024 * 1024), 2),
-                "error": "포트 바인딩을 확인할 수 없습니다",
-                "detected_health_endpoint": None,
-            }
+        target_host: str | None = None
+        target_port = container_port
 
-        host_port = int(port_bindings[port_key][0]["HostPort"])
+        networks = test_container.attrs.get("NetworkSettings", {}).get("Networks") or {}
+        if current_network:
+            network_info = networks.get(current_network) or {}
+            target_host = network_info.get("IPAddress") or None
+
+        if not target_host:
+            port_bindings = test_container.attrs["NetworkSettings"]["Ports"]
+            port_key = f"{container_port}/tcp"
+            if not port_bindings or port_key not in port_bindings or not port_bindings[port_key]:
+                return {
+                    "valid": False,
+                    "image_id": image.id,
+                    "image_size_mb": round(image.attrs["Size"] / (1024 * 1024), 2),
+                    "error": "포트 바인딩을 확인할 수 없습니다",
+                    "detected_health_endpoint": None,
+                }
+            target_host = "localhost"
+            target_port = int(port_bindings[port_key][0]["HostPort"])
 
         # 5) HTTP 헬스체크 또는 자동 감지 probing (Task 3)
         detected_health_endpoint: str | None = None
         if health_endpoint:
-            url = f"http://localhost:{host_port}{health_endpoint}"
+            url = f"http://{target_host}:{target_port}{health_endpoint}"
             healthy = False
             for attempt in range(3):
                 try:
@@ -306,7 +339,7 @@ def _validate_image_sync(
                 }
         else:
             # 빈 값이면 후보 경로 순차 probing (Task 3)
-            detected_health_endpoint = probe_health_endpoints("localhost", host_port)
+            detected_health_endpoint = probe_health_endpoints(target_host, target_port)
 
         image_size_mb = round(image.attrs["Size"] / (1024 * 1024), 2)
         return {

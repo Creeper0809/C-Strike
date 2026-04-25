@@ -47,21 +47,11 @@ export const DEPLOY_STAGE_LABELS: Record<string, string> = {
 
 export const NAV_ITEMS = [
   { href: "/", label: "대시보드", icon: "LayoutDashboard" },
-  { href: "/competitions", label: "대회 관리", icon: "Trophy", adminOnly: true },
   { href: "/teams", label: "팀 관리", icon: "Users" },
-  { href: "/services", label: "취약 서비스", icon: "Shield" },
-  { href: "/deploy", label: "배포 관리", icon: "Rocket" },
-  { href: "/vulnpacks", label: "취약점팩", icon: "Calendar" },
-  { href: "/scoring", label: "채점 모니터", icon: "Target" },
-  { href: "/flags", label: "플래그 관리", icon: "Flag" },
-  { href: "/containers", label: "컨테이너", icon: "Box" },
-  { href: "/network", label: "네트워크 관제", icon: "Network", adminOnly: true },
+  { href: "/services", label: "문제 관리", icon: "Shield" },
   { href: "/tickets", label: "티켓 관리", icon: "Ticket" },
   { href: "/emergency", label: "비상 통제", icon: "AlertTriangle", adminOnly: true },
-  { href: "/feedbacks", label: "피드백", icon: "MessageSquare" },
-  { href: "/operators", label: "운영자 관리", icon: "UserCog", adminOnly: true },
-  { href: "/cguard", label: "C-Guard", icon: "Shield" },
-  { href: "/discord-bot", label: "Discord Bot", icon: "Bot" },
+  { href: "/operators", label: "유저 관리", icon: "UserCog", adminOnly: true },
   { href: "/audit", label: "감사 로그", icon: "ClipboardList" },
   { href: "/settings", label: "설정", icon: "Settings", adminOnly: true },
 ] as const;

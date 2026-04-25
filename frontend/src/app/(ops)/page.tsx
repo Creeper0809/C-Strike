@@ -5,7 +5,7 @@ import {
   Users,
   Target,
   Ticket,
-  Calendar,
+  Box,
   RefreshCw,
   Activity,
   TrendingUp,
@@ -21,7 +21,7 @@ import {
 } from "recharts";
 import { apiFetch } from "@/lib/api-client";
 import { cn } from "@/lib/utils";
-import type { DashboardStats, AuditLog, VulnpackSchedule } from "@/types/ops";
+import type { DashboardStats, AuditLog } from "@/types/ops";
 
 const REFRESH_INTERVAL_MS = 30_000;
 
@@ -85,7 +85,7 @@ function StatCardGrid({ stats }: { stats: DashboardStats }) {
     { label: "활성 팀", value: stats.active_teams, icon: Users },
     { label: "채점 라운드", value: stats.scoring_round, icon: Target },
     { label: "열린 티켓", value: stats.open_tickets, icon: Ticket },
-    { label: "현재 취약점팩", value: stats.current_vulnpack, icon: Calendar },
+    { label: "실행 컨테이너", value: stats.running_containers, icon: Box },
   ];
 
   return (
@@ -149,82 +149,6 @@ function SystemHealthBar({
           </div>
         );
       })}
-    </div>
-  );
-}
-
-/* ─────────────────── VulnPackProgress ─────────────────────── */
-
-const PACK_STATE_CONFIG: Record<
-  string,
-  { fill: string; label: string; progress: number }
-> = {
-  released: { fill: "bg-status-ok", label: "공개됨", progress: 100 },
-  scheduled: { fill: "bg-text-muted", label: "예정", progress: 0 },
-  cancelled: { fill: "bg-status-danger", label: "취소됨", progress: 0 },
-};
-
-function VulnPackProgress() {
-  const [packs, setPacks] = useState<VulnpackSchedule[]>([]);
-  const [loading, setLoading] = useState(true);
-
-  useEffect(() => {
-    apiFetch<VulnpackSchedule[]>("/vulnpacks/")
-      .then((d) => setPacks(Array.isArray(d) ? d : []))
-      .catch(() => setPacks([]))
-      .finally(() => setLoading(false));
-  }, []);
-
-  // pack_number 오름차순 정렬 — 실제 DB 팩 개수만큼 렌더
-  const sortedPacks = [...packs].sort((a, b) => a.pack_number - b.pack_number);
-
-  return (
-    <div className="bg-bg-secondary border border-border rounded-xl p-5">
-      <div className="flex items-center justify-between mb-4">
-        <h2 className="text-sm font-semibold text-text-primary">
-          취약점팩 진행률
-        </h2>
-        <span className="text-xs text-text-muted font-mono">
-          총 {sortedPacks.length}개
-        </span>
-      </div>
-      {loading ? (
-        <div className="space-y-3">
-          {Array.from({ length: 3 }).map((_, i) => (
-            <div key={i} className="h-2 bg-bg-tertiary rounded-full animate-pulse" />
-          ))}
-        </div>
-      ) : sortedPacks.length === 0 ? (
-        <div className="text-xs text-text-muted py-6 text-center">
-          등록된 취약점팩이 없습니다. 취약점팩 관리 페이지에서 생성하세요.
-        </div>
-      ) : (
-        <div className="flex flex-col gap-3">
-          {sortedPacks.map((p) => {
-            const config =
-              PACK_STATE_CONFIG[p.status] ?? PACK_STATE_CONFIG.scheduled;
-            return (
-              <div key={p.id} className="flex items-center gap-3">
-                <span className="text-xs text-text-secondary font-mono w-16 shrink-0">
-                  Pack {p.pack_number}
-                </span>
-                <div className="flex-1 h-2 rounded-full bg-bg-tertiary overflow-hidden">
-                  <div
-                    className={cn(
-                      "h-full rounded-full transition-all",
-                      config.fill,
-                    )}
-                    style={{ width: `${config.progress}%` }}
-                  />
-                </div>
-                <span className="text-xs text-text-muted w-16 text-right shrink-0">
-                  {config.label}
-                </span>
-              </div>
-            );
-          })}
-        </div>
-      )}
     </div>
   );
 }
@@ -360,7 +284,7 @@ function SkeletonLoader() {
         ))}
       </div>
 
-      {/* VulnPack 스켈레톤 */}
+      {/* 중간 패널 스켈레톤 */}
       <div className="bg-bg-secondary border border-border rounded-xl p-5 animate-pulse">
         <div className="h-4 w-32 bg-bg-tertiary rounded mb-4" />
         {Array.from({ length: 5 }).map((_, i) => (
@@ -382,6 +306,8 @@ const DEFAULT_STATS: DashboardStats = {
   scoring_round: 0,
   open_tickets: 0,
   current_vulnpack: 0,
+  total_containers: 0,
+  running_containers: 0,
   system_health: {},
 };
 
@@ -474,13 +400,10 @@ export default function DashboardPage() {
           <SystemHealthBar health={stats.system_health} />
         </section>
 
-        {/* 3. 취약점팩 진행률 — 실제 DB 팩 개수에 따라 동적 렌더 */}
-        <VulnPackProgress />
-
-        {/* 4. 채점 성공률 추이 */}
+        {/* 3. 채점 성공률 추이 */}
         <ScoringTimeline />
 
-        {/* 5. 최근 운영 활동 (감사 로그 기반) */}
+        {/* 4. 최근 운영 활동 (감사 로그 기반) */}
         <RecentActivity />
       </div>
     </div>

@@ -14,6 +14,7 @@ from app.database import get_db
 from app.api.deps import get_current_operator, require_role
 from app.external import discord_client
 from app.models.competition import Competition
+from app.models.discord_member import DiscordGuildMember
 from app.models.team import Team, TeamMember
 from app.models.team_service import TeamService
 from app.models.vuln_service import VulnService
@@ -27,14 +28,18 @@ from app.schemas.team import (
     TeamListResponse,
     TeamMemberItem,
     TeamMemberListResponse,
+    TeamMemberCreateRequest,
+    TeamMemberCreateResponse,
     TeamResponse,
+    TeamSshPasswordRevealResponse,
     TeamServiceItem,
     TeamServiceListResponse,
     TeamUpdate,
 )
 from app.utils.audit import record_audit
-from app.utils.crypto import encrypt_password
+from app.utils.crypto import decrypt_password, encrypt_password
 from app.utils.events import publish_event
+from app.utils.team_slots import allocate_team_slot, get_team_slot_pool
 
 router = APIRouter(tags=["팀 관리"])
 logger = logging.getLogger("ops.teams")
@@ -80,6 +85,40 @@ async def _get_team_or_404(
     return team
 
 
+def _preferred_discord_member_name(member: DiscordGuildMember) -> str:
+    for candidate in (
+        member.display_name,
+        member.nick,
+        member.global_name,
+        member.username,
+        member.discord_user_id,
+    ):
+        normalized = str(candidate or "").strip()
+        if normalized:
+            return normalized
+    return "unknown"
+
+
+async def _safe_grant_team_role(
+    *,
+    discord_user_id: str,
+    role_id: str | None,
+) -> None:
+    """팀 역할 부여 — 실패해도 팀원 DB 반영은 유지."""
+    if not role_id:
+        return
+    try:
+        await discord_client.assign_team_role(discord_user_id, role_id)
+    except Exception as exc:
+        logger.warning(
+            "Discord 팀 역할 부여 실패 (discord_user_id=%s, role_id=%s): %s. "
+            "관리자가 Discord에서 수동으로 역할 정리 필요.",
+            discord_user_id,
+            role_id,
+            exc,
+        )
+
+
 def _generate_team_code(name: str) -> str:
     """팀명 기반 팀 코드 생성. 예: 'CyberPhoenix' → 'CP-A3F2'."""
     initials = "".join(c for c in name if c.isupper())[:2]
@@ -105,6 +144,7 @@ async def create_team(
     디스코드 연동 후 실제 값으로 PATCH 업데이트한다.
     """
     competition = await _get_competition_or_404(db, competition_id)
+    slot_pool = get_team_slot_pool()
 
     # 최대 팀 수 초과 검증
     team_count = (await db.execute(
@@ -131,12 +171,42 @@ async def create_team(
             detail="같은 대회에 동일한 팀명이 이미 존재합니다.",
         )
 
+    auto_allocate_slot = not any([
+        (body.subnet or "").strip(),
+        (body.gateway_ip or "").strip(),
+        (body.ssh_user or "").strip(),
+        body.ssh_password,
+    ])
+    allocated_slot = None
+    if auto_allocate_slot and slot_pool:
+        allocated_slot = await allocate_team_slot(db)
+        if allocated_slot is None:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="할당 가능한 팀 슬롯이 없습니다. 기존 팀을 삭제하거나 슬롯 풀을 늘려주세요.",
+            )
+
+    assigned_subnet = body.subnet.strip() if body.subnet else None
+    assigned_gateway_ip = body.gateway_ip.strip() if body.gateway_ip else None
+    assigned_ssh_port = body.ssh_port
+    assigned_ssh_user = body.ssh_user.strip() if body.ssh_user else None
+    assigned_ssh_password = body.ssh_password
+    vpn_profile_issued = False
+
+    if allocated_slot is not None:
+        assigned_subnet = allocated_slot.subnet
+        assigned_gateway_ip = allocated_slot.gateway_ip
+        assigned_ssh_port = allocated_slot.ssh_port
+        assigned_ssh_user = allocated_slot.ssh_user
+        assigned_ssh_password = allocated_slot.ssh_password
+        vpn_profile_issued = allocated_slot.vpn_profile_issued
+
     # 서브넷 중복 검증 (값이 있을 때만)
-    if body.subnet:
+    if assigned_subnet:
         subnet_conflict = await db.execute(
             select(Team.id).where(
                 Team.competition_id == competition_id,
-                Team.subnet == body.subnet,
+                Team.subnet == assigned_subnet,
             )
         )
         if subnet_conflict.scalar_one_or_none() is not None:
@@ -167,13 +237,13 @@ async def create_team(
         name=body.name,
         team_code=team_code,
         captain_discord_id="UNASSIGNED",
-        subnet=body.subnet,
-        gateway_ip=body.gateway_ip,
-        vpn_profile_issued=False,
+        subnet=assigned_subnet,
+        gateway_ip=assigned_gateway_ip,
+        vpn_profile_issued=vpn_profile_issued,
         status="pending",
-        ssh_port=body.ssh_port,
-        ssh_user=body.ssh_user,
-        ssh_password=encrypt_password(body.ssh_password) if body.ssh_password else None,
+        ssh_port=assigned_ssh_port,
+        ssh_user=assigned_ssh_user,
+        ssh_password=encrypt_password(assigned_ssh_password) if assigned_ssh_password else None,
     )
     db.add(team)
     await db.flush()
@@ -181,7 +251,14 @@ async def create_team(
     await record_audit(
         db, current_operator, "ops.team.create",
         target_type="team", target_id=team.id,
-        details={"team_name": team.name, "team_code": team_code},
+        details={
+            "team_name": team.name,
+            "team_code": team_code,
+            "slot_id": allocated_slot.slot_id if allocated_slot else None,
+            "auto_allocated": allocated_slot is not None,
+            "subnet": team.subnet,
+            "gateway_ip": team.gateway_ip,
+        },
         ip_address=request.client.host if request.client else None,
     )
 
@@ -278,6 +355,49 @@ async def get_team(
     resp = TeamResponse.model_validate(team)
     resp.ssh_configured = bool(team.ssh_user and team.ssh_password)
     return resp
+
+
+@router.post("/{team_id}/ssh-password/reveal", response_model=TeamSshPasswordRevealResponse)
+async def reveal_team_ssh_password(
+    competition_id: UUID,
+    team_id: UUID,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_operator: Operator = Depends(require_role("admin")),
+) -> TeamSshPasswordRevealResponse:
+    """운영자가 팀 서버 SSH 비밀번호를 일회성으로 조회한다."""
+    team = await _get_team_or_404(db, competition_id, team_id)
+
+    if not team.ssh_password:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="저장된 SSH 비밀번호가 없습니다.",
+        )
+
+    try:
+        plaintext_password = decrypt_password(team.ssh_password)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(exc),
+        ) from exc
+
+    revealed_at = datetime.now(timezone.utc)
+    await record_audit(
+        db, current_operator, "ops.team.ssh_password.reveal",
+        target_type="team", target_id=team.id,
+        details={"team_name": team.name, "gateway_ip": team.gateway_ip},
+        ip_address=request.client.host if request.client else None,
+    )
+
+    return TeamSshPasswordRevealResponse(
+        team_id=team.id,
+        team_name=team.name,
+        ssh_user=team.ssh_user,
+        ssh_password=plaintext_password,
+        revealed_at=revealed_at,
+        message="SSH 비밀번호가 일회성으로 조회되었습니다.",
+    )
 
 
 @router.patch("/{team_id}")
@@ -463,6 +583,157 @@ async def list_team_members(
         team_name=team.name,
         items=items,
         total=len(items),
+    )
+
+
+@router.post("/{team_id}/members", status_code=status.HTTP_201_CREATED)
+async def add_team_member(
+    competition_id: UUID,
+    team_id: UUID,
+    body: TeamMemberCreateRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_operator: Operator = Depends(require_role("admin")),
+) -> TeamMemberCreateResponse:
+    """디스코드 멤버 디렉터리를 기준으로 팀원을 추가/재활성화한다."""
+    competition = await _get_competition_or_404(db, competition_id)
+    team = await _get_team_or_404(db, competition_id, team_id)
+
+    directory_member = (
+        await db.execute(
+            select(DiscordGuildMember).where(
+                DiscordGuildMember.discord_user_id == body.discord_user_id,
+                DiscordGuildMember.is_in_guild.is_(True),
+            )
+        )
+    ).scalar_one_or_none()
+    if directory_member is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="해당 Discord 사용자를 디렉터리에서 찾을 수 없습니다. 먼저 멤버 동기화를 실행하세요.",
+        )
+    if directory_member.is_bot:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="봇 계정은 팀원으로 추가할 수 없습니다.",
+        )
+
+    other_team_row = (
+        await db.execute(
+            select(TeamMember, Team)
+            .join(Team, Team.id == TeamMember.team_id)
+            .where(
+                Team.competition_id == competition_id,
+                Team.id != team.id,
+                TeamMember.discord_user_id == body.discord_user_id,
+                TeamMember.status.in_(["pending", "approved"]),
+            )
+        )
+    ).first()
+    if other_team_row is not None:
+        _, assigned_team = other_team_row
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"해당 Discord 사용자는 이미 '{assigned_team.name}' 팀에 소속되어 있습니다.",
+        )
+
+    existing_member = (
+        await db.execute(
+            select(TeamMember).where(
+                TeamMember.team_id == team.id,
+                TeamMember.discord_user_id == body.discord_user_id,
+            )
+        )
+    ).scalar_one_or_none()
+
+    active_member_count = (
+        await db.execute(
+            select(func.count()).select_from(TeamMember).where(
+                TeamMember.team_id == team.id,
+                TeamMember.status.in_(["pending", "approved"]),
+            )
+        )
+    ).scalar_one()
+
+    if existing_member is None or existing_member.status not in {"pending", "approved"}:
+        if active_member_count >= competition.max_members_per_team:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"팀 최대 인원({competition.max_members_per_team}명)을 초과할 수 없습니다.",
+            )
+
+    member_name = _preferred_discord_member_name(directory_member)
+    now = datetime.now(timezone.utc)
+
+    if existing_member is None:
+        member = TeamMember(
+            team_id=team.id,
+            discord_user_id=body.discord_user_id,
+            discord_username=member_name,
+            role=body.role,
+            status="approved",
+            joined_at=now,
+        )
+        db.add(member)
+        message = "팀원이 추가되었습니다."
+    else:
+        member = existing_member
+        member.discord_username = member_name
+        member.role = body.role
+        member.status = "approved"
+        member.joined_at = now
+        message = "팀원 정보가 갱신되었습니다."
+
+    if body.role == "captain":
+        prior_captains = (
+            await db.execute(
+                select(TeamMember).where(
+                    TeamMember.team_id == team.id,
+                    TeamMember.role == "captain",
+                    TeamMember.discord_user_id != body.discord_user_id,
+                )
+            )
+        ).scalars().all()
+        for prior in prior_captains:
+            prior.role = "member"
+        team.captain_discord_id = body.discord_user_id
+    elif team.captain_discord_id == body.discord_user_id:
+        team.captain_discord_id = "UNASSIGNED"
+
+    team.updated_at = now
+    await db.flush()
+
+    await record_audit(
+        db,
+        current_operator,
+        "ops.team.member.add",
+        target_type="team",
+        target_id=team.id,
+        details={
+            "team_name": team.name,
+            "discord_user_id": body.discord_user_id,
+            "discord_username": member_name,
+            "role": body.role,
+            "message": message,
+        },
+        ip_address=request.client.host if request.client else None,
+    )
+
+    await _safe_grant_team_role(
+        discord_user_id=body.discord_user_id,
+        role_id=team.discord_role_id,
+    )
+
+    return TeamMemberCreateResponse(
+        id=member.id,
+        discord_user_id=member.discord_user_id,
+        discord_username=member.discord_username,
+        role=member.role,
+        status=member.status,
+        joined_at=member.joined_at,
+        team_id=team.id,
+        team_name=team.name,
+        message=message,
     )
 
 

@@ -13,7 +13,13 @@ import * as Dialog from "@radix-ui/react-dialog";
 import { X } from "lucide-react";
 import { apiFetch } from "@/lib/api-client";
 import { cn } from "@/lib/utils";
-import type { EmergencyStatus, EmergencyAction } from "@/types/ops";
+import type {
+  EmergencyStatus,
+  EmergencyAction,
+  NetworkActionResponse,
+  NetworkStatusResponse,
+  NetworkTeamSummary,
+} from "@/types/ops";
 
 /* ────────────────────── Constants ────────────────────── */
 
@@ -27,6 +33,11 @@ const ACTION_TYPE_LABELS: Record<string, string> = {
   resume: "재개",
 };
 
+const NETWORK_TEAM_STATUS_LABELS: Record<string, string> = {
+  connected: "정상",
+  isolated: "격리됨",
+};
+
 /* ────────────────────── Types ────────────────────── */
 
 interface HistoryResponse {
@@ -35,6 +46,7 @@ interface HistoryResponse {
 }
 
 type HaltAction = "halt_all" | "halt_scoring" | "resume";
+type IsolationAction = "isolate" | "restore" | "isolate-all" | "restore-all";
 
 /* ────────────────────── Helpers ────────────────────── */
 
@@ -377,6 +389,332 @@ function HaltControls({
   );
 }
 
+/* ────────────────────── TeamIsolationControls ────────────────────── */
+
+function TeamIsolationControls() {
+  const [competitionId, setCompetitionId] = useState<string | null>(null);
+  const [networkStatus, setNetworkStatus] = useState<NetworkStatusResponse | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [activeModal, setActiveModal] = useState<{
+    type: IsolationAction;
+    team?: NetworkTeamSummary;
+  } | null>(null);
+
+  const fetchCompetitionId = useCallback(async () => {
+    const data = await apiFetch<{ items: { id: string }[] }>(
+      "/v1/competitions/?page=1&size=1",
+    );
+    return data.items[0]?.id ?? null;
+  }, []);
+
+  const fetchNetworkStatus = useCallback(async (targetCompetitionId: string) => {
+    const data = await apiFetch<NetworkStatusResponse>(
+      `/v1/competitions/${targetCompetitionId}/network/status`,
+    );
+    setNetworkStatus(data);
+    setError(null);
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function bootstrap() {
+      try {
+        const id = await fetchCompetitionId();
+        if (cancelled) return;
+
+        if (!id) {
+          setCompetitionId(null);
+          setNetworkStatus(null);
+          setError("등록된 대회가 없어 팀 격리 제어를 사용할 수 없습니다.");
+          return;
+        }
+
+        setCompetitionId(id);
+        await fetchNetworkStatus(id);
+      } catch (err) {
+        if (cancelled) return;
+        const message =
+          err instanceof Error ? err.message : "팀 격리 상태를 불러올 수 없습니다.";
+        setError(message);
+      } finally {
+        if (!cancelled) {
+          setLoading(false);
+        }
+      }
+    }
+
+    bootstrap();
+    return () => {
+      cancelled = true;
+    };
+  }, [fetchCompetitionId, fetchNetworkStatus]);
+
+  useEffect(() => {
+    if (!competitionId) return;
+
+    const interval = setInterval(() => {
+      void fetchNetworkStatus(competitionId).catch((err) => {
+        const message =
+          err instanceof Error ? err.message : "팀 격리 상태를 불러올 수 없습니다.";
+        setError(message);
+      });
+    }, REFRESH_INTERVAL_MS);
+
+    return () => clearInterval(interval);
+  }, [competitionId, fetchNetworkStatus]);
+
+  async function handleAction(action: IsolationAction, reason: string) {
+    if (!competitionId) {
+      throw new Error("대회 정보가 없어 요청을 처리할 수 없습니다.");
+    }
+
+    const teamId = activeModal?.team?.team_id;
+    const endpoints: Record<IsolationAction, string> = {
+      isolate: `/v1/competitions/${competitionId}/network/teams/${teamId}/isolate`,
+      restore: `/v1/competitions/${competitionId}/network/teams/${teamId}/restore`,
+      "isolate-all": `/v1/competitions/${competitionId}/network/isolate-all`,
+      "restore-all": `/v1/competitions/${competitionId}/network/restore-all`,
+    };
+
+    await apiFetch<NetworkActionResponse>(endpoints[action], {
+      method: "POST",
+      body: JSON.stringify({ reason }),
+    });
+
+    await fetchNetworkStatus(competitionId);
+    setActiveModal(null);
+  }
+
+  function openModal(type: IsolationAction, team?: NetworkTeamSummary) {
+    setActiveModal({ type, team });
+  }
+
+  async function handleManualRefresh() {
+    if (!competitionId) return;
+    try {
+      await fetchNetworkStatus(competitionId);
+    } catch (err) {
+      const message =
+        err instanceof Error ? err.message : "팀 격리 상태를 불러올 수 없습니다.";
+      setError(message);
+    }
+  }
+
+  const modalConfig = activeModal
+    ? {
+        isolate: {
+          title: `${activeModal.team?.team_name ?? "팀"} 격리`,
+          description: "선택한 팀의 네트워크를 강제로 격리합니다.",
+          confirmLabel: "팀 격리 실행",
+          variant: "danger" as const,
+        },
+        restore: {
+          title: `${activeModal.team?.team_name ?? "팀"} 복구`,
+          description: "선택한 팀의 네트워크 격리를 해제합니다.",
+          confirmLabel: "팀 복구 실행",
+          variant: "ok" as const,
+        },
+        "isolate-all": {
+          title: "전체 팀 격리",
+          description: "모든 팀의 네트워크를 동시에 격리합니다.",
+          confirmLabel: "전체 격리 실행",
+          variant: "danger" as const,
+        },
+        "restore-all": {
+          title: "전체 팀 복구",
+          description: "모든 팀의 네트워크 격리를 해제합니다.",
+          confirmLabel: "전체 복구 실행",
+          variant: "ok" as const,
+        },
+      }[activeModal.type]
+    : null;
+
+  return (
+    <section className="space-y-4">
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <h2 className="text-sm font-semibold text-text-primary">
+            팀 격리 제어
+          </h2>
+          <p className="text-xs text-text-muted mt-1">
+            팀별 네트워크를 강제로 격리하거나 복구하는 운영 제어 영역입니다.
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={() => void handleManualRefresh()}
+          disabled={!competitionId}
+          className="inline-flex items-center gap-2 px-3 py-2 text-xs font-medium rounded-lg bg-bg-tertiary text-text-secondary hover:text-text-primary hover:bg-bg-tertiary/80 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+        >
+          <RefreshCw className="w-3.5 h-3.5" />
+          새로고침
+        </button>
+      </div>
+
+      {loading && (
+        <div className="bg-bg-secondary border border-border rounded-xl p-5">
+          <div className="space-y-3 animate-pulse">
+            <div className="h-4 w-32 bg-bg-tertiary rounded" />
+            <div className="h-16 bg-bg-tertiary rounded" />
+            <div className="h-16 bg-bg-tertiary rounded" />
+          </div>
+        </div>
+      )}
+
+      {!loading && !competitionId && (
+        <div className="bg-bg-secondary border border-border rounded-xl p-5">
+          <p className="text-sm text-text-secondary">
+            {error ?? "등록된 대회가 없어 팀 격리 제어를 사용할 수 없습니다."}
+          </p>
+        </div>
+      )}
+
+      {networkStatus && (
+        <>
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            <div className="bg-bg-secondary border border-border rounded-xl p-4">
+              <p className="text-xs text-text-muted">대상 팀</p>
+              <p className="mt-1 text-2xl font-semibold text-text-primary">
+                {networkStatus.total_teams}
+              </p>
+            </div>
+            <div className="bg-bg-secondary border border-border rounded-xl p-4">
+              <p className="text-xs text-text-muted">정상 상태</p>
+              <p className="mt-1 text-2xl font-semibold text-status-ok">
+                {networkStatus.teams_online}
+              </p>
+            </div>
+            <div className="bg-bg-secondary border border-border rounded-xl p-4">
+              <p className="text-xs text-text-muted">격리됨</p>
+              <p className="mt-1 text-2xl font-semibold text-status-danger">
+                {networkStatus.teams_isolated}
+              </p>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-3">
+            <button
+              type="button"
+              onClick={() => openModal("isolate-all")}
+              disabled={networkStatus.total_teams === 0 || networkStatus.is_all_isolated}
+              className="px-4 py-2 text-sm font-medium rounded-lg bg-status-danger text-white hover:bg-status-danger/80 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+            >
+              전체 격리
+            </button>
+            <button
+              type="button"
+              onClick={() => openModal("restore-all")}
+              disabled={networkStatus.teams_isolated === 0}
+              className="px-4 py-2 text-sm font-medium rounded-lg bg-status-ok text-white hover:bg-status-ok/80 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+            >
+              전체 복구
+            </button>
+            {error && (
+              <span className="text-xs text-status-warning">
+                최신 상태 갱신 실패
+              </span>
+            )}
+          </div>
+
+          <div className="bg-bg-secondary border border-border rounded-xl overflow-hidden">
+            <div className="px-4 py-3 border-b border-border flex items-center justify-between gap-4">
+              <div className="text-sm font-semibold text-text-primary">
+                팀별 제어
+              </div>
+              <div className="text-xs text-text-muted">
+                직접 계측이 아니라 운영 격리 상태 기준으로 표시됩니다.
+              </div>
+            </div>
+
+            {networkStatus.teams.length === 0 ? (
+              <div className="px-4 py-8 text-sm text-text-muted text-center">
+                제어 가능한 팀이 없습니다.
+              </div>
+            ) : (
+              <div className="divide-y divide-border">
+                {networkStatus.teams.map((team) => {
+                  const isIsolated = team.status === "isolated";
+                  return (
+                    <div
+                      key={team.team_id}
+                      className="px-4 py-4 flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4"
+                    >
+                      <div className="space-y-1">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <span className="text-sm font-semibold text-text-primary">
+                            {team.team_name}
+                          </span>
+                          <span
+                            className={cn(
+                              "inline-flex items-center px-2 py-0.5 rounded-md text-xs font-medium",
+                              isIsolated
+                                ? "bg-status-danger/10 text-status-danger"
+                                : "bg-status-ok/10 text-status-ok",
+                            )}
+                          >
+                            {NETWORK_TEAM_STATUS_LABELS[team.status] ?? team.status}
+                          </span>
+                        </div>
+                        <div className="text-xs text-text-secondary font-mono">
+                          {team.subnet ?? "-"} / {team.gateway_ip ?? "-"}
+                        </div>
+                        {team.isolation_reason && (
+                          <div className="text-xs text-text-muted">
+                            사유: {team.isolation_reason}
+                          </div>
+                        )}
+                        {team.isolated_at && (
+                          <div className="text-xs text-text-muted">
+                            격리 시각: {formatDateTime(team.isolated_at)}
+                          </div>
+                        )}
+                      </div>
+
+                      <div className="flex items-center gap-2">
+                        {isIsolated ? (
+                          <button
+                            type="button"
+                            onClick={() => openModal("restore", team)}
+                            className="px-3 py-2 text-sm font-medium rounded-lg bg-status-ok text-white hover:bg-status-ok/80 transition-colors"
+                          >
+                            복구
+                          </button>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => openModal("isolate", team)}
+                            className="px-3 py-2 text-sm font-medium rounded-lg bg-status-danger text-white hover:bg-status-danger/80 transition-colors"
+                          >
+                            격리
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        </>
+      )}
+
+      {activeModal && modalConfig && (
+        <ReasonModal
+          open={true}
+          onOpenChange={(open) => !open && setActiveModal(null)}
+          title={modalConfig.title}
+          description={modalConfig.description}
+          confirmLabel={modalConfig.confirmLabel}
+          variant={modalConfig.variant}
+          onConfirm={(reason) => handleAction(activeModal.type, reason)}
+        />
+      )}
+    </section>
+  );
+}
+
 /* ────────────────────── EmergencyHistory ────────────────────── */
 
 function EmergencyHistory() {
@@ -633,10 +971,13 @@ export default function EmergencyPage() {
           />
         </section>
 
-        {/* 3. 이력 테이블 */}
+        {/* 3. 팀 격리 제어 */}
+        <TeamIsolationControls />
+
+        {/* 4. 이력 테이블 */}
         <EmergencyHistory />
 
-        {/* 4. 하단 경고 */}
+        {/* 5. 하단 경고 */}
         <p className="text-xs text-text-muted italic">
           이 작업은 되돌릴 수 있지만, 대회 진행에 즉각적인 영향을 미칩니다.
         </p>
