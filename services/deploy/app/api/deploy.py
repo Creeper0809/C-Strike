@@ -25,7 +25,9 @@ class ServiceInput(BaseModel):
     docker_image: str
     container_port: int
     health_check_endpoint: str | None = None
+    healthcheck_scenarios: dict | None = None
     env_vars: dict | None = None
+    flag_slots: list[dict] | None = None
 
 
 class DeployTeamsRequest(BaseModel):
@@ -49,7 +51,9 @@ async def deploy_to_teams(req: DeployTeamsRequest, background_tasks: BackgroundT
         docker_image=req.service.docker_image,
         container_port=req.service.container_port,
         health_check_endpoint=req.service.health_check_endpoint,
+        healthcheck_scenarios=req.service.healthcheck_scenarios,
         env_vars=req.service.env_vars,
+        flag_slots=req.service.flag_slots,
     )
     teams = [
         TeamInfo(

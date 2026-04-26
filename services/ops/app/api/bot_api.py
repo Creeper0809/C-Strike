@@ -49,6 +49,8 @@ from app.schemas.bot_api import (
     BotTeamListItem,
     BotTeamListResponse,
     BotTeamMemberInfo,
+    BotTeamRoleLinkRequest,
+    BotTeamRoleLinkResponse,
     BotTicketCreateRequest,
     BotTicketCreateResponse,
 )
@@ -75,9 +77,11 @@ async def verify_bot_api_key(x_bot_api_key: str = Header(...)):
 def _generate_team_code(name: str) -> str:
     """팀명 기반 팀 코드 생성. 예: 'CyberPhoenix' → 'CP-A3F2'."""
     # 팀명에서 대문자 또는 첫 글자 추출 (최대 2자)
-    initials = "".join(c for c in name if c.isupper())[:2]
+    initials = "".join(c for c in name if c.isupper() and c.isalnum())[:2]
     if len(initials) < 2:
-        initials = name[:2].upper()
+        initials = "".join(c for c in name.upper() if c.isalnum())[:2]
+    if len(initials) < 2:
+        initials = (initials + "TM")[:2]
     suffix = "".join(secrets.choice(string.ascii_uppercase + string.digits) for _ in range(4))
     return f"{initials}-{suffix}"
 
@@ -126,6 +130,26 @@ async def _find_team_by_discord_id(
         return None
     member, team = row[0], row[1]
     return team, member
+
+
+def _coerce_utc(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _competition_window_error(comp: Competition, *, now: datetime | None = None) -> str | None:
+    current_time = now or datetime.now(timezone.utc)
+    scheduled_start_at = _coerce_utc(comp.scheduled_start_at)
+    scheduled_end_at = _coerce_utc(comp.scheduled_end_at)
+
+    if scheduled_start_at and current_time < scheduled_start_at:
+        return "대회 시작 전에는 FLAG를 제출할 수 없습니다."
+    if scheduled_end_at and current_time >= scheduled_end_at:
+        return "대회 시간이 종료되어 FLAG를 제출할 수 없습니다."
+    return None
 
 
 # ── 0-A. 내 소속 팀 조회 ───────────────────────────────────
@@ -706,6 +730,49 @@ async def get_team_info(
     )
 
 
+@router.post("/teams/{team_id}/role-link")
+async def link_team_role(
+    team_id: UUID,
+    body: BotTeamRoleLinkRequest,
+    db: AsyncSession = Depends(get_db),
+    _: None = Depends(verify_bot_api_key),
+) -> BotTeamRoleLinkResponse:
+    """봇에서 운영포털 팀과 Discord 역할 연결을 저장한다."""
+
+    team = await _get_team_or_404(db, team_id)
+    normalized_role_id = str(body.discord_role_id or "").strip()
+    if not normalized_role_id:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="discord_role_id는 비어 있을 수 없습니다.",
+        )
+
+    team.discord_role_id = normalized_role_id
+    await db.flush()
+
+    await record_bot_audit(
+        db,
+        "bot.team.role_link",
+        target_type="team",
+        target_id=team.id,
+        details={
+            "guild_id": body.guild_id,
+            "discord_role_id": normalized_role_id,
+            "discord_role_name": body.discord_role_name,
+            "requested_by_id": body.requested_by_id,
+            "requested_by_name": body.requested_by_name,
+        },
+    )
+
+    return BotTeamRoleLinkResponse(
+        team_id=team.id,
+        team_name=team.name,
+        team_code=team.team_code,
+        discord_role_id=normalized_role_id,
+        message=f"팀 '{team.name}' 역할 연결을 저장했습니다.",
+    )
+
+
 # ── 9. 플래그 제출 ──────────────────────────────────────
 
 @router.post("/flags/submit")
@@ -744,6 +811,13 @@ async def submit_flag(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail="현재 진행 중(running) 상태인 대회가 없습니다.",
             )
+
+    window_error = _competition_window_error(comp)
+    if window_error:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=window_error,
+        )
 
     # 2. 제출자 소속 팀 조회
     team_info = await _find_team_by_discord_id(db, comp.id, body.discord_user_id)
@@ -818,6 +892,9 @@ async def submit_flag(
             submitter_team_id=submitter_team.id,
             target_team_id=matched_flag.team_id,
             service_id=matched_flag.service_id,
+            slot_key=matched_flag.slot_key,
+            slot_label=matched_flag.slot_label,
+            points_awarded=matched_flag.point_value,
             submitted_flag=body.submitted_flag,
             flag_id=matched_flag.id,
             verdict="own_flag",
@@ -854,6 +931,9 @@ async def submit_flag(
             submitter_team_id=submitter_team.id,
             target_team_id=matched_flag.team_id,
             service_id=matched_flag.service_id,
+            slot_key=matched_flag.slot_key,
+            slot_label=matched_flag.slot_label,
+            points_awarded=matched_flag.point_value,
             submitted_flag=body.submitted_flag,
             flag_id=matched_flag.id,
             verdict="duplicate",
@@ -884,6 +964,9 @@ async def submit_flag(
             submitter_team_id=submitter_team.id,
             target_team_id=matched_flag.team_id,
             service_id=matched_flag.service_id,
+            slot_key=matched_flag.slot_key,
+            slot_label=matched_flag.slot_label,
+            points_awarded=matched_flag.point_value,
             submitted_flag=body.submitted_flag,
             flag_id=matched_flag.id,
             verdict="expired",
@@ -913,6 +996,9 @@ async def submit_flag(
             submitter_team_id=submitter_team.id,
             target_team_id=matched_flag.team_id,
             service_id=matched_flag.service_id,
+            slot_key=matched_flag.slot_key,
+            slot_label=matched_flag.slot_label,
+            points_awarded=matched_flag.point_value,
             submitted_flag=body.submitted_flag,
             flag_id=matched_flag.id,
             verdict="expired",
@@ -941,6 +1027,9 @@ async def submit_flag(
         submitter_team_id=submitter_team.id,
         target_team_id=matched_flag.team_id,
         service_id=matched_flag.service_id,
+        slot_key=matched_flag.slot_key,
+        slot_label=matched_flag.slot_label,
+        points_awarded=matched_flag.point_value,
         submitted_flag=body.submitted_flag,
         flag_id=matched_flag.id,
         verdict="correct",
@@ -976,6 +1065,7 @@ async def submit_flag(
         details=BotFlagSubmitDetails(
             target_team=target_team,
             service=service_name,
+            points_earned=matched_flag.point_value,
         ),
     )
 

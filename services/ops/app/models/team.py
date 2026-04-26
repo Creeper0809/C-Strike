@@ -62,4 +62,8 @@ class TeamMember(Base):
     role = Column(String(20), nullable=False, default="member")
     status = Column(String(20), nullable=False, default="pending")
     joined_at = Column(DateTime(timezone=True))
+    vpn_username = Column(String(128))
+    vpn_ip = Column(String(64))
+    vpn_password = Column(Text)  # Fernet 암호화 저장
+    vpn_password_updated_at = Column(DateTime(timezone=True))
     created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())

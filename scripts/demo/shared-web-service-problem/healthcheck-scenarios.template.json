@@ -1,0 +1,47 @@
+{
+  "version": 1,
+  "steps": [
+    {
+      "name": "루트 디렉터리 인덱스 확인",
+      "request": {
+        "method": "GET",
+        "path": "/"
+      },
+      "expect": {
+        "status": 200,
+        "body_contains": [
+          "Index of /",
+          "team-info.txt",
+          "flag.txt"
+        ]
+      }
+    },
+    {
+      "name": "팀 정보 파일 확인",
+      "request": {
+        "method": "GET",
+        "path": "/team-info.txt"
+      },
+      "expect": {
+        "status": 200,
+        "body_contains": [
+          "team_name=",
+          "team_code="
+        ]
+      }
+    },
+    {
+      "name": "주 플래그 파일 확인",
+      "request": {
+        "method": "GET",
+        "path": "/flag.txt"
+      },
+      "expect": {
+        "status": 200,
+        "body_contains": [
+          "FLAG{"
+        ]
+      }
+    }
+  ]
+}

@@ -86,6 +86,12 @@ class DiscordBotClient(ExternalClient):
             {"discord_user_id": discord_user_id, "role_id": role_id},
         )
 
+    async def revoke_team_role(self, discord_user_id: str, role_id: str) -> dict[str, Any]:
+        """운영포털에서 팀원 퇴장 시 호출 — 멤버에게서 팀 역할 회수."""
+        return await self.delete(
+            f"/api/v1/run/requests/team/role/assign/{discord_user_id}/{role_id}",
+        )
+
     async def grant_operator_role(self, discord_user_id: str) -> dict[str, Any]:
         """운영포털에서 운영자 생성/연동 시 호출 — 봇이 대상 멤버에게 '운영진' 역할 부여.
 

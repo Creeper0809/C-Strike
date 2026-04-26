@@ -2,7 +2,6 @@
 
 import { useCallback, useEffect, useState } from "react";
 import {
-  Plus,
   RefreshCw,
   X,
   Send,
@@ -14,7 +13,6 @@ import {
   Filter,
 } from "lucide-react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import * as Dialog from "@radix-ui/react-dialog";
 import { apiFetch } from "@/lib/api-client";
 import { cn } from "@/lib/utils";
 import {
@@ -61,6 +59,7 @@ const KANBAN_COLUMNS: { key: string; label: string }[] = [
   { key: "in_progress", label: "처리 중" },
   { key: "resolved", label: "해결됨" },
   { key: "rejected", label: "반려됨" },
+  { key: "closed", label: "보관됨" },
 ];
 
 const TYPE_LABELS: Record<string, { label: string; color: string; bg: string }> = {
@@ -1063,197 +1062,6 @@ function TicketDetailPanel({
   );
 }
 
-/* ────────────────────── TicketCreateModal ────────────────────── */
-
-function TicketCreateModal({
-  open,
-  onOpenChange,
-  onCreated,
-}: {
-  open: boolean;
-  onOpenChange: (open: boolean) => void;
-  onCreated: () => void;
-}) {
-  const [type, setType] = useState<"dispute" | "violation">("dispute");
-  const [title, setTitle] = useState("");
-  const [description, setDescription] = useState("");
-  const [teamName, setTeamName] = useState("");
-  const [priority, setPriority] = useState("medium");
-  const [isSubmitting, setIsSubmitting] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  async function handleCreate() {
-    const trimmedTitle = title.trim();
-    const trimmedDesc = description.trim();
-
-    if (!trimmedTitle) {
-      setError("제목을 입력해 주세요.");
-      return;
-    }
-    if (!trimmedDesc) {
-      setError("설명을 입력해 주세요.");
-      return;
-    }
-
-    setIsSubmitting(true);
-    setError(null);
-
-    try {
-      await apiFetch("/tickets/", {
-        method: "POST",
-        body: JSON.stringify({
-          type,
-          title: trimmedTitle,
-          description: trimmedDesc,
-          team_name: teamName.trim() || null,
-          priority,
-        }),
-      });
-      resetForm();
-      onOpenChange(false);
-      onCreated();
-    } catch (err) {
-      const message =
-        err instanceof Error ? err.message : "티켓 생성에 실패했습니다.";
-      setError(message);
-    } finally {
-      setIsSubmitting(false);
-    }
-  }
-
-  function resetForm() {
-    setType("dispute");
-    setTitle("");
-    setDescription("");
-    setTeamName("");
-    setPriority("medium");
-    setError(null);
-  }
-
-  function handleOpenChange(value: boolean) {
-    if (!value) resetForm();
-    onOpenChange(value);
-  }
-
-  return (
-    <Dialog.Root open={open} onOpenChange={handleOpenChange}>
-      <Dialog.Portal>
-        <Dialog.Overlay className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0" />
-        <Dialog.Content className="fixed left-1/2 top-1/2 z-50 w-full max-w-lg -translate-x-1/2 -translate-y-1/2 bg-bg-elevated border border-border rounded-xl p-6 shadow-2xl focus:outline-none data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95">
-          <Dialog.Close asChild>
-            <button
-              type="button"
-              className="absolute right-4 top-4 p-1 rounded-md text-text-muted hover:text-text-primary hover:bg-bg-tertiary transition-colors"
-              aria-label="닫기"
-            >
-              <X className="w-4 h-4" />
-            </button>
-          </Dialog.Close>
-
-          <Dialog.Title className="text-lg font-semibold text-text-primary pr-8">
-            새 티켓 생성
-          </Dialog.Title>
-          <Dialog.Description className="mt-2 text-sm text-text-secondary leading-relaxed">
-            이의제기 또는 규정위반 티켓을 생성합니다.
-          </Dialog.Description>
-
-          <div className="mt-4 space-y-3">
-            <label className="block">
-              <span className="text-xs text-text-secondary mb-1 block">유형</span>
-              <select
-                value={type}
-                onChange={(e) =>
-                  setType(e.target.value as "dispute" | "violation")
-                }
-                className="w-full px-3 py-2 bg-bg-secondary border border-border rounded-lg text-sm text-text-primary focus:outline-none focus:border-accent transition-colors"
-              >
-                <option value="dispute">이의제기</option>
-                <option value="violation">규정위반</option>
-              </select>
-            </label>
-
-            <label className="block">
-              <span className="text-xs text-text-secondary mb-1 block">제목</span>
-              <input
-                type="text"
-                value={title}
-                onChange={(e) => setTitle(e.target.value)}
-                placeholder="티켓 제목을 입력하세요"
-                className="w-full px-3 py-2 bg-bg-secondary border border-border rounded-lg text-sm text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent transition-colors"
-              />
-            </label>
-
-            <label className="block">
-              <span className="text-xs text-text-secondary mb-1 block">설명</span>
-              <textarea
-                value={description}
-                onChange={(e) => setDescription(e.target.value)}
-                placeholder="상세 설명을 입력하세요"
-                rows={4}
-                className="w-full px-3 py-2 bg-bg-secondary border border-border rounded-lg text-sm text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent transition-colors resize-none"
-              />
-            </label>
-
-            <label className="block">
-              <span className="text-xs text-text-secondary mb-1 block">
-                팀명 (선택)
-              </span>
-              <input
-                type="text"
-                value={teamName}
-                onChange={(e) => setTeamName(e.target.value)}
-                placeholder="관련 팀명 (선택사항)"
-                className="w-full px-3 py-2 bg-bg-secondary border border-border rounded-lg text-sm text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent transition-colors"
-              />
-            </label>
-
-            <label className="block">
-              <span className="text-xs text-text-secondary mb-1 block">
-                우선순위
-              </span>
-              <select
-                value={priority}
-                onChange={(e) => setPriority(e.target.value)}
-                className="w-full px-3 py-2 bg-bg-secondary border border-border rounded-lg text-sm text-text-primary focus:outline-none focus:border-accent transition-colors"
-              >
-                {Object.entries(PRIORITY_MAP).map(([key, val]) => (
-                  <option key={key} value={key}>
-                    {val.label}
-                  </option>
-                ))}
-              </select>
-            </label>
-
-            {error && <p className="text-xs text-status-danger">{error}</p>}
-          </div>
-
-          <div className="mt-6 flex items-center justify-end gap-3">
-            <Dialog.Close asChild>
-              <button
-                type="button"
-                className="px-4 py-2 text-sm font-medium rounded-lg bg-bg-tertiary text-text-secondary hover:text-text-primary hover:bg-bg-tertiary/80 transition-colors"
-              >
-                취소
-              </button>
-            </Dialog.Close>
-            <button
-              type="button"
-              onClick={handleCreate}
-              disabled={isSubmitting}
-              className={cn(
-                "px-4 py-2 text-sm font-medium rounded-lg bg-accent hover:bg-accent-hover text-white transition-colors",
-                isSubmitting && "opacity-50 cursor-not-allowed",
-              )}
-            >
-              {isSubmitting ? "생성 중..." : "티켓 생성"}
-            </button>
-          </div>
-        </Dialog.Content>
-      </Dialog.Portal>
-    </Dialog.Root>
-  );
-}
-
 /* ────────────────────── TicketsPage ────────────────────── */
 
 export default function TicketsPage() {
@@ -1268,7 +1076,6 @@ export default function TicketsPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [selectedTicketId, setSelectedTicketId] = useState<string | null>(null);
-  const [createModal, setCreateModal] = useState(false);
 
   useEffect(() => {
     setMainTab(requestedMainTab);
@@ -1291,7 +1098,7 @@ export default function TicketsPage() {
 
   const fetchTickets = useCallback(async () => {
     try {
-      const data = await apiFetch<TicketListResponse>("/tickets/?limit=200");
+      const data = await apiFetch<TicketListResponse>("/tickets/?limit=100");
       setTickets(data.items);
       setError(null);
     } catch (err) {
@@ -1353,7 +1160,7 @@ export default function TicketsPage() {
         </div>
 
         <div className="flex gap-4 overflow-x-auto">
-          {Array.from({ length: 4 }).map((_, i) => (
+          {Array.from({ length: KANBAN_COLUMNS.length }).map((_, i) => (
             <div key={i} className="min-w-[260px] flex-1">
               <div className="h-4 w-20 bg-bg-tertiary rounded mb-3 animate-pulse" />
               <div className="space-y-2">
@@ -1401,14 +1208,6 @@ export default function TicketsPage() {
               aria-label="새로고침"
             >
               <RefreshCw className="w-4 h-4" />
-            </button>
-            <button
-              type="button"
-              onClick={() => setCreateModal(true)}
-              className="flex items-center gap-2 px-4 py-2 bg-accent hover:bg-accent-hover text-white text-sm font-medium rounded-lg transition-colors"
-            >
-              <Plus className="w-4 h-4" />
-              새 티켓
             </button>
           </div>
         )}
@@ -1458,12 +1257,6 @@ export default function TicketsPage() {
               onUpdated={fetchTickets}
             />
           )}
-
-          <TicketCreateModal
-            open={createModal}
-            onOpenChange={setCreateModal}
-            onCreated={fetchTickets}
-          />
         </>
       ) : (
         <FeedbackPanel />

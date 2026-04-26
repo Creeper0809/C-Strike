@@ -29,16 +29,27 @@ export interface OperatorUpdatePayload {
   password?: string;
 }
 
+export interface FlagSlotConfig {
+  slot_key?: string | null;
+  label: string;
+  filename: string;
+  points: number;
+  difficulty: "Easy" | "Medium" | "Hard" | string;
+}
+
 export interface VulnService {
   id: string;
   name: string;
   description: string | null;
+  connection_info: string | null;
   category: string;
   competition_id: string | null;          // 귀속 대회(ondelete=SET NULL). 배포/롤백 전 필수
   competition_name: string | null;        // 상세 표시용 (백엔드가 프리뷰 문자열로 제공 가능)
   docker_image: string | null;
   health_check_endpoint: string | null;  // Task 6: 헬스체크 경로 (null이면 TCP 체크)
+  healthcheck_scenarios: Record<string, unknown> | null;
   flag_format: string | null;             // Task 6: 편집 모달용 (FLAG{...})
+  flag_slots: FlagSlotConfig[];
   // 빌드 성공 시 "active"로 자동 전환. admin 1인 운영 환경이라 pending/approved/rejected는 제거됨.
   status: "draft" | "active";
   version: number;
@@ -49,7 +60,7 @@ export interface VulnService {
   approved_at: string | null;
   created_at: string;
   // Phase 11: 배포 시스템
-  env_type: "dockerfile" | "image";
+  env_type: "dockerfile" | "image" | "connection_info";
   container_port: number | null;
   build_status: "building" | "success" | "failed" | null;
   build_log: string | null;
@@ -97,6 +108,7 @@ export interface DeployPipeline {
   service_name: string | null;
   status: string;
   current_stage: string | null;
+  scheduled_for: string | null;
   started_at: string | null;
   completed_at: string | null;
   error_detail: string | null;
@@ -332,6 +344,45 @@ export interface TeamMemberCreateResponse extends TeamMemberItem {
   team_id: string;
   team_name: string;
   message: string;
+  vpn_username: string | null;
+  vpn_ip: string | null;
+  generated_vpn_password: string | null;
+  vpn_credentials_issued: boolean;
+}
+
+export interface TeamMemberRemoveResponse extends TeamMemberItem {
+  team_id: string;
+  team_name: string;
+  message: string;
+  vpn_username: string | null;
+  vpn_disabled: boolean;
+}
+
+export interface TeamMutationItem {
+  id: string;
+  operation_type: string;
+  status: "running" | "completed" | "failed";
+  requested_by_name: string;
+  payload: Record<string, unknown> | null;
+  result: Record<string, unknown> | null;
+  error_detail: string | null;
+  started_at: string;
+  completed_at: string | null;
+  retryable: boolean;
+}
+
+export interface TeamMutationListResponse {
+  team_id: string;
+  team_name: string;
+  items: TeamMutationItem[];
+  total: number;
+}
+
+export interface TeamMutationRetryResponse {
+  mutation_id: string;
+  operation_type: string;
+  message: string;
+  team_deleted: boolean;
 }
 
 export interface TeamServiceItem {
@@ -344,6 +395,33 @@ export interface TeamServiceItem {
   status: string;
   last_health_check_at: string | null;
   last_health_check_result: boolean | null;
+  health_check_endpoint: string | null;
+  healthcheck_scenarios: Record<string, unknown> | null;
+  last_health_check_type: string | null;
+  last_health_check_error: string | null;
+  last_health_check_response_time_ms: number | null;
+}
+
+export interface TeamServiceHealthcheckStepResult {
+  step_index: number;
+  name: string;
+  request_label: string;
+  status: "passed" | "failed" | "not_run";
+  response_time_ms: number | null;
+  error_message: string | null;
+}
+
+export interface TeamServiceHealthcheckLiveResponse {
+  team_id: string;
+  team_service_id: string;
+  service_id: string;
+  service_name: string;
+  check_type: string;
+  is_up: boolean;
+  response_time_ms: number | null;
+  error_message: string | null;
+  checked_at: string;
+  steps: TeamServiceHealthcheckStepResult[];
 }
 
 // ── 플래그 관리 ──
@@ -357,6 +435,10 @@ export interface FlagItem {
   team_name: string;
   service_id: string;
   service_name: string;
+  slot_key: string;
+  slot_label: string;
+  flag_filename: string;
+  point_value: number;
   flag_value: string;
   is_active: boolean;
   planted_at: string | null;
@@ -380,6 +462,9 @@ export interface FlagSubmissionItem {
   target_team_name: string | null;
   service_id: string | null;
   service_name: string | null;
+  slot_key: string | null;
+  slot_label: string | null;
+  points_awarded: number | null;
   submitted_flag: string;
   verdict: FlagVerdict;
   submitter_discord_id: string | null;

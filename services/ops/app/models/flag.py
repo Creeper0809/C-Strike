@@ -2,7 +2,7 @@
 
 from uuid import uuid4
 
-from sqlalchemy import Boolean, CheckConstraint, Column, DateTime, ForeignKey, String, UniqueConstraint, func
+from sqlalchemy import Boolean, CheckConstraint, Column, DateTime, ForeignKey, Integer, String, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import UUID
 
 from app.database import Base
@@ -13,14 +13,18 @@ class Flag(Base):
 
     __tablename__ = "flags"
     __table_args__ = (
-        UniqueConstraint("round_id", "team_id", "service_id", name="uq_flags_round_team_service"),
+        UniqueConstraint("round_id", "team_id", "service_id", "slot_key", name="uq_flags_round_team_service_slot"),
     )
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid4)
     round_id = Column(UUID(as_uuid=True), ForeignKey("scoring_rounds.id", ondelete="CASCADE"), nullable=False)
     team_id = Column(UUID(as_uuid=True), ForeignKey("teams.id", ondelete="CASCADE"), nullable=False)
     service_id = Column(UUID(as_uuid=True), ForeignKey("vuln_services.id", ondelete="RESTRICT"), nullable=False)
-    flag_value = Column(String(100), nullable=False, index=True)
+    slot_key = Column(String(64), nullable=False, default="primary")
+    slot_label = Column(String(100), nullable=False, default="기본 플래그")
+    flag_filename = Column(String(255), nullable=False, default="flag.txt")
+    point_value = Column(Integer, nullable=False, default=100)
+    flag_value = Column(String(255), nullable=False, index=True)
     is_active = Column(Boolean, nullable=False, default=True)
     planted_at = Column(DateTime(timezone=True))
     expires_at = Column(DateTime(timezone=True))
@@ -44,7 +48,10 @@ class FlagSubmission(Base):
     submitter_team_id = Column(UUID(as_uuid=True), ForeignKey("teams.id", ondelete="CASCADE"), nullable=False)
     target_team_id = Column(UUID(as_uuid=True), ForeignKey("teams.id", ondelete="SET NULL"))
     service_id = Column(UUID(as_uuid=True), ForeignKey("vuln_services.id", ondelete="SET NULL"))
-    submitted_flag = Column(String(100), nullable=False, index=True)
+    slot_key = Column(String(64))
+    slot_label = Column(String(100))
+    points_awarded = Column(Integer)
+    submitted_flag = Column(String(255), nullable=False, index=True)
     flag_id = Column(UUID(as_uuid=True), ForeignKey("flags.id", ondelete="SET NULL"))
     verdict = Column(String(20), nullable=False)
     submitter_discord_id = Column(String(50))

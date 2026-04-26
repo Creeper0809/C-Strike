@@ -40,6 +40,10 @@ async def _resolve_operator_names(
 def _enrich_ticket(
     ticket, name_map: dict,
 ) -> TicketResponse:
+    if not ticket.priority:
+        ticket.priority = "medium"
+    if not ticket.status:
+        ticket.status = "open"
     resp = TicketResponse.model_validate(ticket)
     if ticket.assigned_to:
         resp.assigned_to_name = name_map.get(ticket.assigned_to)

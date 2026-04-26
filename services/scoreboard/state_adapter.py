@@ -62,13 +62,14 @@ def build_state(bundled: dict[str, Any]) -> dict[str, Any]:
     v2_rankings = _build_rankings(rankings_body, team_by_name)
 
     return {
+        "competition_name": info.get("name") or "C-STRIKE",
         "round": int(info.get("current_round", 0) or 0),
         "is_frozen": bool(info.get("is_frozen", False)),
         "rankings": v2_rankings,
         "teams": teams,
         "score_history": score_history,
         "vulnpack_schedule": vulnpacks,
-        "services": services,
+        "services": services or all_services,
         "all_services": all_services,
         "attack_matrix": attack_matrix,
         "defense_record": {},           # 운영 포털 미제공 — UI 가드 보호용

@@ -17,6 +17,7 @@ from sqlalchemy import text
 from .config import settings
 from .database import async_session_factory
 from .events import CH_SLA_DOWN, EventBus
+from .health_contract import run_health_contract
 
 logger = logging.getLogger("scoring.sla_checker")
 
@@ -56,6 +57,7 @@ class SLAChecker:
                         t.name AS team_name,
                         vs.name AS service_name,
                         vs.health_check_endpoint,
+                        vs.healthcheck_scenarios,
                         vs.category
                     FROM team_services ts
                     JOIN teams t ON ts.team_id = t.id
@@ -110,14 +112,25 @@ class SLAChecker:
         host_ip = target.host_ip
         port = target.port
         health_endpoint = target.health_check_endpoint
-        check_type = self._determine_check_type(health_endpoint, target.category)
+        healthcheck_scenarios = target.healthcheck_scenarios
+        check_type = self._determine_check_type(
+            health_endpoint,
+            healthcheck_scenarios,
+            target.category,
+        )
 
         is_up = False
         response_time_ms: int | None = None
         error_message: str | None = None
 
         try:
-            if check_type == "http_get" and health_endpoint:
+            if check_type == "custom_script" and healthcheck_scenarios:
+                is_up, response_time_ms, error_message = await self._scenario_check(
+                    host_ip,
+                    port,
+                    healthcheck_scenarios,
+                )
+            elif check_type == "http_get" and health_endpoint:
                 is_up, response_time_ms, error_message = await self._http_check(
                     host_ip, port, health_endpoint
                 )
@@ -211,8 +224,22 @@ class SLAChecker:
             return False, None, f"TCP 연결 실패: {exc}"
 
     @staticmethod
-    def _determine_check_type(health_endpoint: str | None, category: str) -> str:
+    def _determine_check_type(
+        health_endpoint: str | None,
+        healthcheck_scenarios: dict | None,
+        category: str,
+    ) -> str:
         """서비스 정보를 기반으로 체크 방식을 결정한다."""
+        if healthcheck_scenarios and isinstance(healthcheck_scenarios, dict) and healthcheck_scenarios.get("steps"):
+            return "custom_script"
         if health_endpoint:
             return "http_get"
         return "tcp_connect"
+
+    async def _scenario_check(
+        self,
+        host: str,
+        port: int,
+        scenarios: dict,
+    ) -> tuple[bool, int | None, str | None]:
+        return await run_health_contract(f"http://{host}:{port}", scenarios)

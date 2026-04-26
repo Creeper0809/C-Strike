@@ -88,6 +88,12 @@ function render() {
 
 // ── Header ──
 function renderHeader() {
+    const title = state.competition_name || "C-STRIKE";
+    const titleEl = document.querySelector(".header-title");
+    if (titleEl) {
+        titleEl.textContent = title;
+    }
+    document.title = `${title} 스코어보드`;
     document.getElementById("roundBadge").textContent = `라운드 ${state.round}`;
 
     const frozenEl = document.getElementById("frozenBadge");

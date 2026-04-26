@@ -8,9 +8,15 @@ import { Plus, X, Trash2, Loader2, Pencil, CheckCircle2, Hammer, RotateCw, Alert
 import { apiFetch } from "@/lib/api-client";
 import { cn } from "@/lib/utils";
 import { DEPLOY_STAGES, DEPLOY_STAGE_LABELS, SERVICE_STATUS_MAP, STATUS_COLORS } from "@/lib/constants";
-import type { DeployPipeline, VulnService } from "@/types/ops";
+import type { DeployPipeline, FlagSlotConfig, VulnService } from "@/types/ops";
 import PageHeader from "@/components/ui/PageHeader";
 import DataTable from "@/components/ui/DataTable";
+import FlagSlotEditor, { createDefaultFlagSlot } from "@/components/services/FlagSlotEditor";
+import HealthCheckScenarioEditor from "@/components/services/HealthCheckScenarioEditor";
+import {
+  extractHealthcheckScenarioDocument,
+  type HealthcheckScenarioDocument,
+} from "@/components/services/healthcheckScenarioUtils";
 
 /* ─── 상수 ────────────────────────────────────────────── */
 
@@ -29,6 +35,13 @@ const CATEGORY_OPTIONS = [
 ] as const;
 
 const PAGE_SIZE = 20;
+type ServiceEnvironmentType = "dockerfile" | "image" | "connection_info";
+
+const ENV_TYPE_LABELS: Record<ServiceEnvironmentType, string> = {
+  image: "Docker 이미지",
+  dockerfile: "Dockerfile 업로드",
+  connection_info: "접속 정보",
+};
 
 interface PipelineListItem {
   id: string;
@@ -174,12 +187,12 @@ interface RegisterFormData {
   competition_id: string;
   docker_image: string;
   description: string;
-  flag_format: string;
+  connection_info: string;
+  flag_slots: FlagSlotConfig[];
   health_check_endpoint: string;
-  env_type: "dockerfile" | "image";
+  healthcheck_scenarios: HealthcheckScenarioDocument | null;
+  env_type: ServiceEnvironmentType;
   container_port: string;
-  score: string;
-  difficulty: string;
 }
 
 const INITIAL_FORM: RegisterFormData = {
@@ -188,19 +201,13 @@ const INITIAL_FORM: RegisterFormData = {
   competition_id: "",
   docker_image: "",
   description: "",
-  flag_format: "",
+  connection_info: "",
+  flag_slots: [createDefaultFlagSlot(1, 100)],
   health_check_endpoint: "",
+  healthcheck_scenarios: null,
   env_type: "image" as const,
   container_port: "",
-  score: "100",
-  difficulty: "Easy",
 };
-
-const DIFFICULTY_OPTIONS = [
-  { value: "Easy", label: "Easy (초급)" },
-  { value: "Medium", label: "Medium (중급)" },
-  { value: "Hard", label: "Hard (고급)" },
-] as const;
 
 interface CompetitionOption {
   id: string;
@@ -256,6 +263,7 @@ export default function ServicesPage() {
 
   /* 토스트 알림 */
   const [toasts, setToasts] = useState<ToastItem[]>([]);
+  const registerTotalPoints = form.flag_slots.reduce((sum, slot) => sum + (Number(slot.points) || 0), 0);
 
   function addToast(message: string, type: ToastItem["type"], id?: string): string {
     const toastId = id ?? crypto.randomUUID();
@@ -290,12 +298,12 @@ export default function ServicesPage() {
   const [editForm, setEditForm] = useState<{
     name: string;
     description: string;
+    connection_info: string;
     category: string;
     docker_image: string;
-    flag_format: string;
+    flag_slots: FlagSlotConfig[];
     health_check_endpoint: string;
-    score: string;
-    difficulty: string;
+    healthcheck_scenarios: HealthcheckScenarioDocument | null;
   } | null>(null);
   const [isEditSubmitting, setIsEditSubmitting] = useState(false);
 
@@ -387,6 +395,7 @@ export default function ServicesPage() {
   async function handleRegister() {
     if (!form.name.trim()) return;
     if (form.env_type === "image" && !form.docker_image.trim()) return;
+    if (form.env_type === "connection_info" && !form.connection_info.trim()) return;
     if (!form.competition_id) {
       alert("문제를 등록할 대회를 선택해 주세요. 대회가 없으면 먼저 운영용 대회를 준비하세요.");
       return;
@@ -395,16 +404,22 @@ export default function ServicesPage() {
     setIsSubmitting(true);
     const serviceName = form.name.trim();
 
+    let created: VulnService | null = null;
     try {
       const body = {
         ...form,
         competition_id: form.competition_id || null,
-        container_port: form.container_port ? parseInt(form.container_port) : null,
+        container_port:
+          form.env_type === "connection_info"
+            ? null
+            : form.container_port
+              ? parseInt(form.container_port)
+              : null,
         docker_image: form.env_type === "image" ? form.docker_image : null,
-        score: parseInt(form.score) || 100,
-        difficulty: form.difficulty || "Easy",
+        connection_info: form.connection_info.trim() || null,
+        healthcheck_scenarios: form.healthcheck_scenarios,
       };
-      const created = await apiFetch<VulnService>("/services/", {
+      created = await apiFetch<VulnService>("/services/", {
         method: "POST",
         body: JSON.stringify(body),
       });
@@ -412,31 +427,50 @@ export default function ServicesPage() {
       // 빌드 파일/ZIP 업로드
       let uploaded = false;
       if (created?.id && form.env_type === "dockerfile") {
-        if (uploadMode === "zip" && zipFile) {
-          const fd = new FormData();
-          fd.append("archive", zipFile);
-          await apiFetch(`/services/${created.id}/build-archive?replace=true`, {
-            method: "POST",
-            body: fd,
-          });
-          uploaded = true;
-        } else if (buildFiles.length > 0) {
-          const fd = new FormData();
-          for (const f of buildFiles) {
-            const rp = (f as File & { webkitRelativePath?: string }).webkitRelativePath;
-            if (rp) {
-              const parts = rp.split("/");
-              const pathWithoutRoot = parts.length > 1 ? parts.slice(1).join("/") : rp;
-              fd.append("files", f, pathWithoutRoot);
-            } else {
-              fd.append("files", f);
+        try {
+          if (uploadMode === "zip" && zipFile) {
+            const fd = new FormData();
+            fd.append("file", zipFile);
+            await apiFetch(`/services/${created.id}/build-archive?replace=true`, {
+              method: "POST",
+              body: fd,
+            });
+            uploaded = true;
+          } else if (buildFiles.length > 0) {
+            const fd = new FormData();
+            for (const f of buildFiles) {
+              const rp = (f as File & { webkitRelativePath?: string }).webkitRelativePath;
+              if (rp) {
+                const parts = rp.split("/");
+                const pathWithoutRoot = parts.length > 1 ? parts.slice(1).join("/") : rp;
+                fd.append("files", f, pathWithoutRoot);
+              } else {
+                fd.append("files", f);
+              }
             }
+            await apiFetch(`/services/${created.id}/build-files`, {
+              method: "POST",
+              body: fd,
+            });
+            uploaded = true;
           }
-          await apiFetch(`/services/${created.id}/build-files`, {
-            method: "POST",
-            body: fd,
-          });
-          uploaded = true;
+        } catch (uploadError) {
+          let rolledBack = false;
+          try {
+            await apiFetch(`/services/${created.id}`, { method: "DELETE" });
+            rolledBack = true;
+          } catch {
+            rolledBack = false;
+          }
+
+          const reason =
+            uploadError instanceof Error ? uploadError.message : "알 수 없는 오류";
+
+          throw new Error(
+            rolledBack
+              ? `빌드 파일 업로드에 실패해 등록을 되돌렸습니다: ${reason}`
+              : `빌드 파일 업로드에 실패했습니다. 서비스는 생성되었을 수 있습니다: ${reason}`,
+          );
         }
       }
 
@@ -491,12 +525,12 @@ export default function ServicesPage() {
     setEditForm({
       name: svc.name,
       description: svc.description ?? "",
+      connection_info: svc.connection_info ?? "",
       category: svc.category,
       docker_image: svc.docker_image ?? "",
-      flag_format: svc.flag_format ?? "",
+      flag_slots: svc.flag_slots?.length ? svc.flag_slots.map((slot) => ({ ...slot })) : [createDefaultFlagSlot(1, svc.score ?? 100)],
       health_check_endpoint: svc.health_check_endpoint ?? "",
-      score: String(svc.score ?? 100),
-      difficulty: svc.difficulty ?? "Easy",
+      healthcheck_scenarios: extractHealthcheckScenarioDocument(svc.healthcheck_scenarios),
     });
     setEditOpen(true);
   }
@@ -531,11 +565,11 @@ export default function ServicesPage() {
         name: editForm.name.trim(),
         category: editForm.category,
         description: editForm.description.trim() || null,
+        connection_info: editForm.connection_info.trim() || null,
         docker_image: editForm.docker_image.trim() || null,
-        flag_format: editForm.flag_format.trim() || null,
+        flag_slots: editForm.flag_slots,
         health_check_endpoint: editForm.health_check_endpoint.trim() || null,
-        score: parseInt(editForm.score) || 100,
-        difficulty: editForm.difficulty || "Easy",
+        healthcheck_scenarios: editForm.healthcheck_scenarios,
       };
       const updated = await apiFetch<VulnService>(`/services/${selected.id}`, {
         method: "PATCH",
@@ -862,10 +896,23 @@ export default function ServicesPage() {
             {/* 상세 정보 */}
             <div className="space-y-3 text-sm">
               <DetailRow label="카테고리" value={selected.category} />
-              <DetailRow label="Docker 이미지" value={selected.docker_image ?? "-"} mono />
+              <DetailRow label="환경 타입" value={ENV_TYPE_LABELS[selected.env_type]} />
+              {selected.env_type !== "connection_info" && (
+                <DetailRow label="Docker 이미지" value={selected.docker_image ?? "-"} mono />
+              )}
               <DetailRow label="버전" value={`v${selected.version}`} />
               <DetailRow label="등록자" value={selected.registered_by_name ?? selected.registered_by} />
               <DetailRow label="등록일" value={formatDate(selected.created_at)} />
+              {selected.connection_info && (
+                <div>
+                  <span className="text-text-muted text-xs uppercase tracking-wider">
+                    접속 정보
+                  </span>
+                  <pre className="mt-1 whitespace-pre-wrap break-words rounded-lg bg-bg-tertiary px-3 py-2 text-xs text-text-secondary">
+                    {selected.connection_info}
+                  </pre>
+                </div>
+              )}
 
               {/* 귀속 대회 — 인라인 변경 가능 (active 상태에서도) */}
               <div className="py-2 border-t border-border/50">
@@ -1187,6 +1234,21 @@ export default function ServicesPage() {
                     검증 후 활성화
                   </button>
                 )}
+                {selected.env_type === "connection_info" && (
+                  <button
+                    type="button"
+                    onClick={() => handleActivate(selected.id)}
+                    disabled={actionLoading !== null}
+                    className="w-full inline-flex items-center justify-center gap-1.5 px-3 py-2 text-sm font-medium rounded-lg bg-status-ok/15 text-status-ok hover:bg-status-ok/25 transition-colors disabled:opacity-50"
+                  >
+                    {actionLoading === "activate" ? (
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                    ) : (
+                      <CheckCircle2 className="w-4 h-4" />
+                    )}
+                    바로 활성화
+                  </button>
+                )}
                 {selected.env_type === "dockerfile" && selected.build_status === "building" && (
                   <button
                     type="button"
@@ -1237,19 +1299,21 @@ export default function ServicesPage() {
             {/* 액션 버튼 — active 상태: 재빌드/삭제 */}
             {selected.status === "active" && (
               <div className="space-y-2 pt-2 border-t border-border">
-                <button
-                  type="button"
-                  onClick={() => handleDeploy(selected.id, selected.name)}
-                  disabled={actionLoading !== null || !selected.competition_id}
-                  className="w-full inline-flex items-center justify-center gap-1.5 px-3 py-2 text-sm font-medium rounded-lg bg-status-info/15 text-status-info hover:bg-status-info/25 transition-colors disabled:opacity-50"
-                >
-                  {actionLoading === "deploy" ? (
-                    <Loader2 className="w-4 h-4 animate-spin" />
-                  ) : (
-                    <Rocket className="w-4 h-4" />
-                  )}
-                  배포 시작
-                </button>
+                {selected.env_type !== "connection_info" && (
+                  <button
+                    type="button"
+                    onClick={() => handleDeploy(selected.id, selected.name)}
+                    disabled={actionLoading !== null || !selected.competition_id}
+                    className="w-full inline-flex items-center justify-center gap-1.5 px-3 py-2 text-sm font-medium rounded-lg bg-status-info/15 text-status-info hover:bg-status-info/25 transition-colors disabled:opacity-50"
+                  >
+                    {actionLoading === "deploy" ? (
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                    ) : (
+                      <Rocket className="w-4 h-4" />
+                    )}
+                    배포 시작
+                  </button>
+                )}
                 {selected.env_type === "dockerfile" && (
                   <button
                     type="button"
@@ -1264,6 +1328,11 @@ export default function ServicesPage() {
                     )}
                     재빌드
                   </button>
+                  )}
+                {selected.env_type === "connection_info" && (
+                  <div className="rounded-lg border border-border bg-bg-tertiary px-3 py-2 text-xs text-text-muted">
+                    이 문제는 접속 정보만 제공하는 수동 문제라 배포/재빌드 작업이 없습니다.
+                  </div>
                 )}
                 <button
                   type="button"
@@ -1296,7 +1365,7 @@ export default function ServicesPage() {
       }}>
         <Dialog.Portal>
           <Dialog.Overlay className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0" />
-          <Dialog.Content className="fixed left-1/2 top-1/2 z-50 w-full max-w-lg max-h-[85vh] -translate-x-1/2 -translate-y-1/2 bg-bg-elevated border border-border rounded-xl shadow-2xl focus:outline-none flex flex-col data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95">
+          <Dialog.Content className="fixed left-1/2 top-1/2 z-50 w-[min(960px,calc(100vw-2rem))] max-h-[85vh] -translate-x-1/2 -translate-y-1/2 bg-bg-elevated border border-border rounded-xl shadow-2xl focus:outline-none flex flex-col data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95">
             {/* 헤더 (고정) */}
             <div className="p-6 pb-0 shrink-0">
               <Dialog.Close asChild>
@@ -1354,32 +1423,12 @@ export default function ServicesPage() {
                 </select>
               </FormField>
 
-              {/* 점수 · 난이도 — 문제 카탈로그(/문제목록)에 그대로 반영 */}
-              <div className="grid grid-cols-2 gap-3">
-                <FormField label="점수" required>
-                  <input
-                    type="number"
-                    min={1}
-                    value={form.score}
-                    onChange={(e) => setForm({ ...form, score: e.target.value })}
-                    placeholder="100"
-                    className="form-input"
-                  />
-                </FormField>
-                <FormField label="난이도" required>
-                  <select
-                    value={form.difficulty}
-                    onChange={(e) => setForm({ ...form, difficulty: e.target.value })}
-                    className="form-input"
-                  >
-                    {DIFFICULTY_OPTIONS.map((opt) => (
-                      <option key={opt.value} value={opt.value}>
-                        {opt.label}
-                      </option>
-                    ))}
-                  </select>
-                </FormField>
-              </div>
+              <FormField label="총점">
+                <div className="form-input flex items-center justify-between">
+                  <span>{registerTotalPoints}점</span>
+                  <span className="text-xs text-text-muted">슬롯별 점수 합계</span>
+                </div>
+              </FormField>
 
               {/* 귀속 대회 — 배포/롤백 전 필수 */}
               <FormField label="귀속 대회" required>
@@ -1411,7 +1460,7 @@ export default function ServicesPage() {
               {/* 환경 타입 선택 */}
               <div className="space-y-2">
                 <label className="text-sm font-medium text-secondary">환경 타입</label>
-                <div className="flex gap-2">
+                <div className="grid gap-2 md:grid-cols-3">
                   <button
                     type="button"
                     onClick={() => setForm(f => ({ ...f, env_type: "image" }))}
@@ -1433,6 +1482,17 @@ export default function ServicesPage() {
                     }`}
                   >
                     Dockerfile 업로드
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setForm(f => ({ ...f, env_type: "connection_info" }))}
+                    className={`flex-1 px-4 py-2 rounded-lg border text-sm font-medium transition-colors ${
+                      form.env_type === "connection_info"
+                        ? "bg-accent text-white border-accent"
+                        : "bg-card border-border text-secondary hover:bg-card-hover"
+                    }`}
+                  >
+                    접속 정보
                   </button>
                 </div>
               </div>
@@ -1608,32 +1668,40 @@ export default function ServicesPage() {
                 </div>
               )}
 
-              {/* 컨테이너 포트 */}
-              <div className="space-y-2">
-                <label className="text-sm font-medium text-secondary">
-                  컨테이너 포트 {form.env_type === "image" ? "*" : "(자동 감지 가능)"}
-                </label>
-                <input
-                  type="number"
-                  value={form.container_port}
-                  onChange={e => setForm(f => ({ ...f, container_port: e.target.value }))}
-                  placeholder="예: 8080"
-                  className="w-full px-3 py-2 bg-card border border-border rounded-lg text-primary"
-                />
-              </div>
+              {form.env_type !== "connection_info" && (
+                <div className="space-y-2">
+                  <label className="text-sm font-medium text-secondary">
+                    컨테이너 포트 {form.env_type === "image" ? "*" : "(자동 감지 가능)"}
+                  </label>
+                  <input
+                    type="number"
+                    value={form.container_port}
+                    onChange={e => setForm(f => ({ ...f, container_port: e.target.value }))}
+                    placeholder="예: 8080"
+                    className="w-full px-3 py-2 bg-card border border-border rounded-lg text-primary"
+                  />
+                </div>
+              )}
 
-              {/* 플래그 형식 */}
-              <FormField label="플래그 형식">
-                <input
-                  type="text"
-                  value={form.flag_format}
-                  onChange={(e) =>
-                    setForm({ ...form, flag_format: e.target.value })
-                  }
-                  placeholder="예: FLAG{...}"
-                  className="form-input font-mono text-xs"
-                />
-              </FormField>
+              {form.env_type === "connection_info" && (
+                <FormField label="접속 정보" required>
+                  <textarea
+                    value={form.connection_info}
+                    onChange={(e) => setForm({ ...form, connection_info: e.target.value })}
+                    placeholder={"예: http://10.1.x.10/\n예: nc TEAM_IP 31337\n예: guest / guest1234"}
+                    rows={4}
+                    className="form-input resize-none"
+                  />
+                  <p className="mt-1 text-xs text-text-muted">
+                    참가자에게 전달할 URL, 포트, 계정, 접속 절차를 자유롭게 적습니다.
+                  </p>
+                </FormField>
+              )}
+
+              <FlagSlotEditor
+                slots={form.flag_slots}
+                onChange={(slots) => setForm({ ...form, flag_slots: slots })}
+              />
 
               {/* 헬스체크 엔드포인트 */}
               <FormField label="헬스체크 엔드포인트">
@@ -1650,6 +1718,12 @@ export default function ServicesPage() {
                   SLA 감시에 사용됩니다. Dockerfile 업로드 시 HEALTHCHECK 지시어 또는 빌드 후 probing으로 자동 감지를 시도합니다.
                 </p>
               </FormField>
+
+              <HealthCheckScenarioEditor
+                value={form.healthcheck_scenarios}
+                onChange={(healthcheck_scenarios) => setForm({ ...form, healthcheck_scenarios })}
+                disabled={isSubmitting}
+              />
 
               {/* 설명 */}
               <FormField label="설명">
@@ -1681,13 +1755,15 @@ export default function ServicesPage() {
                   disabled={
                     isSubmitting ||
                     !form.name.trim() ||
-                    (form.env_type === "image" && !form.docker_image.trim())
+                    (form.env_type === "image" && !form.docker_image.trim()) ||
+                    (form.env_type === "connection_info" && !form.connection_info.trim())
                   }
                   className={cn(
                     "px-4 py-2 text-sm font-medium rounded-lg bg-accent hover:bg-accent/80 text-white transition-colors",
                     (isSubmitting ||
                       !form.name.trim() ||
-                      (form.env_type === "image" && !form.docker_image.trim())) &&
+                      ((form.env_type === "image" && !form.docker_image.trim()) ||
+                        (form.env_type === "connection_info" && !form.connection_info.trim()))) &&
                       "opacity-50 cursor-not-allowed",
                   )}
                 >
@@ -1703,7 +1779,7 @@ export default function ServicesPage() {
       <Dialog.Root open={editOpen} onOpenChange={setEditOpen}>
         <Dialog.Portal>
           <Dialog.Overlay className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0" />
-          <Dialog.Content className="fixed left-1/2 top-1/2 z-50 w-full max-w-lg max-h-[85vh] -translate-x-1/2 -translate-y-1/2 bg-bg-elevated border border-border rounded-xl shadow-2xl focus:outline-none flex flex-col data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95">
+          <Dialog.Content className="fixed left-1/2 top-1/2 z-50 w-[min(960px,calc(100vw-2rem))] max-h-[85vh] -translate-x-1/2 -translate-y-1/2 bg-bg-elevated border border-border rounded-xl shadow-2xl focus:outline-none flex flex-col data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95">
             <div className="p-6 pb-0 shrink-0">
               <Dialog.Close asChild>
                 <button
@@ -1750,49 +1826,43 @@ export default function ServicesPage() {
                     </select>
                   </FormField>
 
-                  <div className="grid grid-cols-2 gap-3">
-                    <FormField label="점수" required>
+                  <FormField label="총점">
+                    <div className="form-input flex items-center justify-between">
+                      <span>
+                        {editForm.flag_slots.reduce((sum, slot) => sum + (Number(slot.points) || 0), 0)}점
+                      </span>
+                      <span className="text-xs text-text-muted">슬롯별 점수 합계</span>
+                    </div>
+                  </FormField>
+
+                  {selected?.env_type !== "connection_info" && (
+                    <FormField label="Docker 이미지">
                       <input
-                        type="number"
-                        min={1}
-                        className="form-input"
-                        value={editForm.score}
-                        onChange={(e) => setEditForm({ ...editForm, score: e.target.value })}
-                        placeholder="100"
+                        type="text"
+                        className="form-input font-mono text-xs"
+                        value={editForm.docker_image}
+                        onChange={(e) => setEditForm({ ...editForm, docker_image: e.target.value })}
+                        placeholder="예: registry.cstrike.io/vuln-web-sqli:latest"
                       />
                     </FormField>
-                    <FormField label="난이도" required>
-                      <select
-                        className="form-input"
-                        value={editForm.difficulty}
-                        onChange={(e) => setEditForm({ ...editForm, difficulty: e.target.value })}
-                      >
-                        {DIFFICULTY_OPTIONS.map((opt) => (
-                          <option key={opt.value} value={opt.value}>{opt.label}</option>
-                        ))}
-                      </select>
+                  )}
+
+                  {selected?.env_type === "connection_info" && (
+                    <FormField label="접속 정보">
+                      <textarea
+                        className="form-input resize-none"
+                        rows={4}
+                        value={editForm.connection_info}
+                        onChange={(e) => setEditForm({ ...editForm, connection_info: e.target.value })}
+                        placeholder={"예: http://10.1.x.10/\n예: nc TEAM_IP 31337\n예: guest / guest1234"}
+                      />
                     </FormField>
-                  </div>
+                  )}
 
-                  <FormField label="Docker 이미지">
-                    <input
-                      type="text"
-                      className="form-input font-mono text-xs"
-                      value={editForm.docker_image}
-                      onChange={(e) => setEditForm({ ...editForm, docker_image: e.target.value })}
-                      placeholder="예: registry.cstrike.io/vuln-web-sqli:latest"
-                    />
-                  </FormField>
-
-                  <FormField label="플래그 형식">
-                    <input
-                      type="text"
-                      className="form-input font-mono text-xs"
-                      value={editForm.flag_format}
-                      onChange={(e) => setEditForm({ ...editForm, flag_format: e.target.value })}
-                      placeholder="예: FLAG{...}"
-                    />
-                  </FormField>
+                      <FlagSlotEditor
+                        slots={editForm.flag_slots}
+                        onChange={(slots) => setEditForm({ ...editForm, flag_slots: slots })}
+                      />
 
                   <FormField label="헬스체크 엔드포인트">
                     <input
@@ -1806,6 +1876,12 @@ export default function ServicesPage() {
                       SLA 감시 정확도 향상용. 웹 서비스는 권장, 포너블/네트워크는 비워도 OK.
                     </p>
                   </FormField>
+
+                  <HealthCheckScenarioEditor
+                    value={editForm.healthcheck_scenarios}
+                    onChange={(healthcheck_scenarios) => setEditForm({ ...editForm, healthcheck_scenarios })}
+                    disabled={isEditSubmitting}
+                  />
 
                   <FormField label="설명">
                     <textarea

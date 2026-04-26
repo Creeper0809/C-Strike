@@ -259,6 +259,7 @@ async def get_scoreboard_info(
     released_service_entries = [
         svc for svc in all_service_entries if svc.id in released_service_id_set
     ]
+    public_service_entries = released_service_entries or all_service_entries
 
     # is_frozen: Competition 모델에 해당 필드가 없을 수 있어 안전 조회
     is_frozen_value = bool(getattr(comp, "is_frozen", False))
@@ -276,7 +277,7 @@ async def get_scoreboard_info(
         total_services=total_services,
         is_frozen=is_frozen_value,
         teams=team_entries,
-        services=released_service_entries,
+        services=public_service_entries,
         all_services=all_service_entries,
         vulnpacks=vulnpack_entries,
     )
@@ -397,15 +398,15 @@ async def get_scoreboard_rankings(
     total_services = await _get_active_service_count(db, competition_id)
     services_up_q = (
         select(
-            TeamService.team_id,
-            func.count().label("up_count"),
+            SlaCheck.team_id,
+            func.count(func.distinct(SlaCheck.service_id)).label("up_count"),
         )
         .where(
-            TeamService.team_id.in_(team_ids),
-            TeamService.status == "running",
-            TeamService.last_health_check_result.is_(True),
+            SlaCheck.team_id.in_(team_ids),
+            SlaCheck.round_id == latest_round.id,
+            SlaCheck.is_up.is_(True),
         )
-        .group_by(TeamService.team_id)
+        .group_by(SlaCheck.team_id)
     )
     services_up_result = await db.execute(services_up_q)
     services_up_map: dict[UUID, int] = {

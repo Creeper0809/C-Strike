@@ -16,6 +16,7 @@ export const TICKET_STATUS_MAP: Record<string, { label: string; color: keyof typ
   in_progress: { label: "처리 중", color: "warning" },
   resolved: { label: "해결됨", color: "ok" },
   rejected: { label: "반려됨", color: "neutral" },
+  closed: { label: "보관됨", color: "neutral" },
   escalated: { label: "상위 보고", color: "info" },
 };
 
@@ -47,11 +48,11 @@ export const DEPLOY_STAGE_LABELS: Record<string, string> = {
 
 export const NAV_ITEMS = [
   { href: "/", label: "대시보드", icon: "LayoutDashboard" },
+  { href: "/operators", label: "유저 관리", icon: "UserCog", adminOnly: true },
   { href: "/teams", label: "팀 관리", icon: "Users" },
   { href: "/services", label: "문제 관리", icon: "Shield" },
   { href: "/tickets", label: "티켓 관리", icon: "Ticket" },
   { href: "/emergency", label: "비상 통제", icon: "AlertTriangle", adminOnly: true },
-  { href: "/operators", label: "유저 관리", icon: "UserCog", adminOnly: true },
   { href: "/audit", label: "감사 로그", icon: "ClipboardList" },
   { href: "/settings", label: "설정", icon: "Settings", adminOnly: true },
 ] as const;

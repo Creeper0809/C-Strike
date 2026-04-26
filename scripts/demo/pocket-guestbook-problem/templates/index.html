@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Pocket Guestbook</title>
+    <style>
+      :root {
+        color-scheme: light;
+        font-family: Arial, sans-serif;
+      }
+      body {
+        margin: 0;
+        background: #f4f6f8;
+        color: #17181a;
+      }
+      main {
+        max-width: 960px;
+        margin: 0 auto;
+        padding: 24px 16px 48px;
+      }
+      h1, h2 {
+        margin: 0 0 12px;
+      }
+      .hero {
+        padding: 20px;
+        background: #ffffff;
+        border: 1px solid #d8dde3;
+        border-radius: 8px;
+        margin-bottom: 20px;
+      }
+      .grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+        gap: 16px;
+      }
+      .panel {
+        background: #ffffff;
+        border: 1px solid #d8dde3;
+        border-radius: 8px;
+        padding: 16px;
+      }
+      dl {
+        margin: 0;
+        display: grid;
+        grid-template-columns: 120px 1fr;
+        gap: 8px 12px;
+      }
+      dt {
+        color: #5d6470;
+      }
+      dd {
+        margin: 0;
+        word-break: break-word;
+      }
+      ul {
+        margin: 0;
+        padding-left: 20px;
+      }
+      code {
+        font-family: "SFMono-Regular", Consolas, monospace;
+        font-size: 0.95rem;
+      }
+      .hint {
+        color: #5d6470;
+        margin-top: 4px;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <section class="hero">
+        <h1>{{ team.service_name }}</h1>
+        <p class="hint">A tiny uploadable sample problem for the ops portal.</p>
+      </section>
+
+      <div class="grid">
+        <section class="panel">
+          <h2>Team Info</h2>
+          <dl>
+            <dt>Team name</dt>
+            <dd>{{ team.team_name }}</dd>
+            <dt>Team code</dt>
+            <dd>{{ team.team_code }}</dd>
+            <dt>VPN subnet</dt>
+            <dd>{{ team.team_subnet or '-' }}</dd>
+            <dt>Mgmt IP</dt>
+            <dd>{{ team.team_gateway_ip or '-' }}</dd>
+          </dl>
+        </section>
+
+        <section class="panel">
+          <h2>Flags</h2>
+          {% if flags %}
+            <ul>
+              {% for flag in flags %}
+                <li><code>{{ flag.filename }}</code>: <code>{{ flag.value }}</code></li>
+              {% endfor %}
+            </ul>
+          {% else %}
+            <p>No flags mounted.</p>
+          {% endif %}
+        </section>
+      </div>
+
+      <section class="panel" style="margin-top: 16px;">
+        <h2>Messages</h2>
+        <ul>
+          {% for message in messages %}
+            <li><strong>{{ message.author }}</strong>: {{ message.content }}</li>
+          {% endfor %}
+        </ul>
+      </section>
+    </main>
+  </body>
+</html>

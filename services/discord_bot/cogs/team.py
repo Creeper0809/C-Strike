@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
+import aiohttp
 import discord
 from discord import app_commands
 from discord.ext import commands, tasks
@@ -245,6 +247,56 @@ async def _resolve_channel(bot: commands.Bot, guild: discord.Guild, channel_id: 
     return guild.system_channel
 
 
+async def _link_team_role_via_api(
+    *,
+    team_id: str,
+    guild_id: str,
+    role: discord.Role,
+    requested_by: discord.abc.User,
+) -> dict:
+    base = str(getattr(config, "BOT_API_BASE_URL", "") or "").rstrip("/")
+    if not base:
+        raise TeamError("BOT_API_BASE_URL이 설정되지 않았습니다.")
+
+    url = f"{base}/teams/{team_id}/role-link"
+    payload = {
+        "guild_id": str(guild_id),
+        "discord_role_id": str(role.id),
+        "discord_role_name": role.name,
+        "requested_by_id": str(getattr(requested_by, "id", "") or "").strip() or None,
+        "requested_by_name": str(requested_by),
+    }
+    headers = {
+        "Content-Type": "application/json",
+        "X-Bot-API-Key": config.BOT_API_KEY,
+    }
+    timeout = aiohttp.ClientTimeout(total=8)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with session.post(url, json=payload, headers=headers) as response:
+            raw_text = (await response.text()).strip()
+            data = None
+            if raw_text:
+                try:
+                    parsed = json.loads(raw_text)
+                except json.JSONDecodeError:
+                    parsed = None
+                if isinstance(parsed, dict):
+                    data = parsed
+
+            if response.status >= 400:
+                detail = ""
+                if isinstance(data, dict):
+                    detail = str(data.get("detail") or data.get("message") or data.get("error") or "").strip()
+                if not detail:
+                    detail = raw_text[:200] if raw_text else f"HTTP {response.status}"
+                raise TeamError(f"운영포털 팀 역할 연결 저장에 실패했습니다: {detail}")
+
+            if not isinstance(data, dict):
+                raise TeamError("운영포털 팀 역할 연결 응답을 해석하지 못했습니다.")
+
+            return data
+
+
 def _build_team_embed(row: dict, title: str, description: str, severity: str | None = None) -> discord.Embed:
     color = {
         "critical": discord.Color.red(),
@@ -417,15 +469,16 @@ class TeamCog(commands.GroupCog, group_name="팀", group_description="팀 조회
             target = next((row for row in teams if str(row.get("team_code", "")).lower() == team_code.strip().lower()), None)
             if not target:
                 raise TeamError(f"`{team_code}` 팀 코드를 찾을 수 없습니다.")
-            db_team.upsert_team_discord_role(
+            api_result = await _link_team_role_via_api(
                 team_id=str(target["id"]),
                 guild_id=str(interaction.guild_id),
-                discord_role_id=str(role.id),
-                discord_role_name=role.name,
-                created_by_id=str(interaction.user.id),
-                created_by_name=str(interaction.user),
+                role=role,
+                requested_by=interaction.user,
             )
-            await interaction.followup.send(f"`{target.get('name')}` 팀을 {role.mention} 역할에 연결했습니다.", ephemeral=True)
+            await interaction.followup.send(
+                str(api_result.get("message") or f"`{target.get('name')}` 팀을 {role.mention} 역할에 연결했습니다."),
+                ephemeral=True,
+            )
         except Exception as exc:
             await self._send_error(interaction, exc)
 

@@ -5,15 +5,18 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import * as Dialog from "@radix-ui/react-dialog";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
 import {
+  Activity,
   AlertTriangle,
   ArrowLeft,
   CheckCircle2,
+  Flag,
   Hammer,
   Loader2,
   Pencil,
   RefreshCw,
   Rocket,
   RotateCw,
+  Shield,
   Trash2,
   X,
 } from "lucide-react";
@@ -28,6 +31,7 @@ import {
 } from "@/lib/constants";
 import type {
   DeployPipeline,
+  FlagSlotConfig,
   FlagItem,
   FlagListResponse,
   FlagStatsResponse,
@@ -36,6 +40,13 @@ import type {
   VulnService,
 } from "@/types/ops";
 import PageHeader from "@/components/ui/PageHeader";
+import FlagSlotEditor, { createDefaultFlagSlot } from "@/components/services/FlagSlotEditor";
+import HealthCheckScenarioEditor from "@/components/services/HealthCheckScenarioEditor";
+import HealthCheckScenarioPanel from "@/components/services/HealthCheckScenarioPanel";
+import {
+  extractHealthcheckScenarioDocument,
+  type HealthcheckScenarioDocument,
+} from "@/components/services/healthcheckScenarioUtils";
 
 const CATEGORY_OPTIONS = [
   { value: "web", label: "웹" },
@@ -43,12 +54,6 @@ const CATEGORY_OPTIONS = [
   { value: "crypto", label: "암호학" },
   { value: "reversing", label: "리버싱" },
   { value: "misc", label: "기타" },
-] as const;
-
-const DIFFICULTY_OPTIONS = [
-  { value: "Easy", label: "Easy (초급)" },
-  { value: "Medium", label: "Medium (중급)" },
-  { value: "Hard", label: "Hard (고급)" },
 ] as const;
 
 interface CompetitionOption {
@@ -65,6 +70,7 @@ interface PipelineListItem {
   service_name: string | null;
   status: string;
   current_stage: string | null;
+  scheduled_for: string | null;
   started_at: string | null;
   completed_at: string | null;
   created_at: string | null;
@@ -77,11 +83,32 @@ interface ToastItem {
 }
 
 type FlagTabKey = "list" | "submissions" | "stats";
+type ServiceDetailTabKey = "overview" | "healthcheck" | "deploy" | "flags" | "build";
+type EditMode = "service" | "healthcheck" | "flags";
+type ServiceEnvironmentType = "dockerfile" | "image" | "connection_info";
+
+const ENV_TYPE_LABELS: Record<ServiceEnvironmentType, string> = {
+  image: "Docker 이미지",
+  dockerfile: "Dockerfile 업로드",
+  connection_info: "접속 정보",
+};
 
 const FLAG_TAB_OPTIONS: Array<{ key: FlagTabKey; label: string }> = [
   { key: "list", label: "플래그 목록" },
   { key: "submissions", label: "제출 기록" },
   { key: "stats", label: "서비스 통계" },
+];
+
+const SERVICE_DETAIL_TABS: Array<{
+  key: ServiceDetailTabKey;
+  label: string;
+  icon: typeof Shield;
+}> = [
+  { key: "overview", label: "개요", icon: Shield },
+  { key: "healthcheck", label: "헬스체크", icon: Activity },
+  { key: "deploy", label: "배포", icon: Rocket },
+  { key: "flags", label: "플래그", icon: Flag },
+  { key: "build", label: "빌드", icon: Hammer },
 ];
 
 const DEPLOY_STATUS_MAP: Record<
@@ -97,6 +124,11 @@ const DEPLOY_STATUS_MAP: Record<
     label: "실행 중",
     color: "text-status-info",
     bg: "bg-status-info/10",
+  },
+  scheduled: {
+    label: "예약됨",
+    color: "text-status-warning",
+    bg: "bg-status-warning/10",
   },
   success: {
     label: "성공",
@@ -176,8 +208,19 @@ function formatDate(iso: string | null): string {
   });
 }
 
+function formatDateTimeLocalInput(date: Date): string {
+  const pad = (value: number) => String(value).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
 function getVerdictInfo(verdict: string) {
   return FLAG_VERDICT_MAP[verdict] ?? { label: verdict, color: "neutral" as const };
+}
+
+function getScenarioStepCount(value: Record<string, unknown> | null | undefined): number {
+  if (!value || typeof value !== "object") return 0;
+  const steps = (value as { steps?: unknown }).steps;
+  return Array.isArray(steps) ? steps.length : 0;
 }
 
 export default function ServiceDetailPage() {
@@ -201,19 +244,27 @@ export default function ServiceDetailPage() {
   const [selectedDeployStage, setSelectedDeployStage] = useState<string | null>(null);
   const [isDeployLoading, setIsDeployLoading] = useState(false);
   const [showDeployHistory, setShowDeployHistory] = useState(false);
+  const [scheduleDeployOpen, setScheduleDeployOpen] = useState(false);
+  const [scheduledForInput, setScheduledForInput] = useState(() => {
+    const base = new Date(Date.now() + 10 * 60 * 1000);
+    base.setSeconds(0, 0);
+    return formatDateTimeLocalInput(base);
+  });
   const [editOpen, setEditOpen] = useState(false);
+  const [editMode, setEditMode] = useState<EditMode>("service");
   const [editForm, setEditForm] = useState<{
     name: string;
     description: string;
+    connection_info: string;
     category: string;
     docker_image: string;
-    flag_format: string;
+    flag_slots: FlagSlotConfig[];
     health_check_endpoint: string;
-    score: string;
-    difficulty: string;
+    healthcheck_scenarios: HealthcheckScenarioDocument | null;
   } | null>(null);
   const [isEditSubmitting, setIsEditSubmitting] = useState(false);
   const [toasts, setToasts] = useState<ToastItem[]>([]);
+  const [activeDetailTab, setActiveDetailTab] = useState<ServiceDetailTabKey>("overview");
   const [activeFlagTab, setActiveFlagTab] = useState<FlagTabKey>("list");
   const [flagItems, setFlagItems] = useState<FlagItem[]>([]);
   const [flagTotal, setFlagTotal] = useState(0);
@@ -472,18 +523,21 @@ export default function ServiceDetailPage() {
     service?.id != null
       ? flagStats?.service_stats.find((item) => item.service_id === service.id) ?? null
       : null;
+  const editTotalPoints =
+    editForm?.flag_slots.reduce((sum, slot) => sum + (Number(slot.points) || 0), 0) ?? 0;
 
-  function openEdit(target: VulnService) {
+  function openEdit(target: VulnService, mode: EditMode) {
     setEditForm({
       name: target.name,
       description: target.description ?? "",
+      connection_info: target.connection_info ?? "",
       category: target.category,
       docker_image: target.docker_image ?? "",
-      flag_format: target.flag_format ?? "",
+      flag_slots: target.flag_slots?.length ? target.flag_slots.map((slot) => ({ ...slot })) : [createDefaultFlagSlot(1, target.score ?? 100)],
       health_check_endpoint: target.health_check_endpoint ?? "",
-      score: String(target.score ?? 100),
-      difficulty: target.difficulty ?? "Easy",
+      healthcheck_scenarios: extractHealthcheckScenarioDocument(target.healthcheck_scenarios),
     });
+    setEditMode(mode);
     setEditOpen(true);
   }
 
@@ -507,16 +561,29 @@ export default function ServiceDetailPage() {
     if (!service || !editForm) return;
     setIsEditSubmitting(true);
     try {
-      const body: Record<string, unknown> = {
-        name: editForm.name.trim(),
-        category: editForm.category,
-        description: editForm.description.trim() || null,
-        docker_image: editForm.docker_image.trim() || null,
-        flag_format: editForm.flag_format.trim() || null,
-        health_check_endpoint: editForm.health_check_endpoint.trim() || null,
-        score: parseInt(editForm.score) || 100,
-        difficulty: editForm.difficulty || "Easy",
-      };
+      let body: Record<string, unknown>;
+      if (editMode === "service") {
+        body = service.status === "draft"
+          ? {
+              name: editForm.name.trim(),
+              category: editForm.category,
+              description: editForm.description.trim() || null,
+              connection_info: editForm.connection_info.trim() || null,
+              docker_image: editForm.docker_image.trim() || null,
+            }
+          : {
+              connection_info: editForm.connection_info.trim() || null,
+            };
+      } else if (editMode === "healthcheck") {
+        body = {
+          health_check_endpoint: editForm.health_check_endpoint.trim() || null,
+          healthcheck_scenarios: editForm.healthcheck_scenarios,
+        };
+      } else {
+        body = {
+          flag_slots: editForm.flag_slots,
+        };
+      }
       const updated = await apiFetch<VulnService>(`/services/${service.id}`, {
         method: "PATCH",
         body: JSON.stringify(body),
@@ -615,6 +682,48 @@ export default function ServiceDetailPage() {
     }
   }
 
+  async function handleScheduleDeploy() {
+    if (!service) return;
+    if (!scheduledForInput) {
+      addToast("예약 시간을 입력해 주세요.", "error");
+      return;
+    }
+
+    const scheduledDate = new Date(scheduledForInput);
+    if (Number.isNaN(scheduledDate.getTime())) {
+      addToast("예약 시간이 올바르지 않습니다.", "error");
+      return;
+    }
+    if (scheduledDate.getTime() <= Date.now()) {
+      addToast("예약 시간은 현재 시각보다 이후여야 합니다.", "error");
+      return;
+    }
+
+    setActionLoading("schedule-deploy");
+    try {
+      await apiFetch("/deploy/pipelines", {
+        method: "POST",
+        body: JSON.stringify({
+          service_id: service.id,
+          scheduled_for: scheduledDate.toISOString(),
+        }),
+      });
+      addToast(
+        `"${service.name}" 배포를 ${formatDateTime(scheduledDate.toISOString())}에 예약했습니다.`,
+        "success",
+      );
+      setScheduleDeployOpen(false);
+      await fetchDeployPipelines(service.id);
+    } catch (err) {
+      addToast(
+        `"${service.name}" 예약 실패: ${err instanceof Error ? err.message : "알 수 없는 오류"}`,
+        "error",
+      );
+    } finally {
+      setActionLoading(null);
+    }
+  }
+
   async function handleDelete() {
     if (!service) return;
     setActionLoading("delete");
@@ -675,7 +784,7 @@ export default function ServiceDetailPage() {
     <div className="space-y-6">
       <PageHeader
         title={service.name}
-        description="문제 설정, 점수/난이도, 배포 상태, 플래그 이력을 여기서 관리합니다."
+        description="문제 설정, 플래그 슬롯, 배포 상태, 플래그 이력을 여기서 관리합니다."
         actions={
           <div className="flex items-center gap-2">
             <StatusBadge status={service.status} />
@@ -693,30 +802,117 @@ export default function ServiceDetailPage() {
 
       <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_360px]">
         <div className="space-y-6">
-          <section className="rounded-xl border border-border bg-bg-secondary p-5 space-y-4">
+          <div className="overflow-x-auto border-b border-border">
+            <div className="flex min-w-max gap-1">
+              {SERVICE_DETAIL_TABS.map((tab) => {
+                const TabIcon = tab.icon;
+                const isActive = activeDetailTab === tab.key;
+                const countLabel =
+                  tab.key === "deploy"
+                    ? `${deployPipelines.length}`
+                    : tab.key === "flags"
+                      ? `${service.flag_slots.length}`
+                      : tab.key === "healthcheck"
+                        ? `${getScenarioStepCount(service.healthcheck_scenarios)} step`
+                        : null;
+
+                return (
+                  <button
+                    key={tab.key}
+                    type="button"
+                    onClick={() => setActiveDetailTab(tab.key)}
+                    className={cn(
+                      "inline-flex items-center gap-2 rounded-t-lg border-b-2 px-3 py-2 text-sm transition-colors",
+                      isActive
+                        ? "border-accent text-accent"
+                        : "border-transparent text-text-muted hover:text-text-primary",
+                    )}
+                  >
+                    <TabIcon className="w-4 h-4" />
+                    {tab.label}
+                    {countLabel && <span className="text-xs text-text-muted">{countLabel}</span>}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          {activeDetailTab === "overview" && (
+            <section className="rounded-xl border border-border bg-bg-secondary p-5 space-y-4">
             <div className="flex items-center justify-between gap-3">
               <h2 className="text-base font-semibold text-text-primary">기본 정보</h2>
               <button
                 type="button"
-                onClick={() => openEdit(service)}
+                onClick={() => openEdit(service, "service")}
                 className="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium rounded-lg bg-accent/15 text-accent hover:bg-accent/25"
               >
                 <Pencil className="w-4 h-4" />
-                {service.status === "draft" ? "문제 수정" : "점수/난이도 수정"}
+                {service.status === "draft" ? "문제 수정" : "접속 정보 수정"}
               </button>
             </div>
 
             <div className="grid gap-3 md:grid-cols-2">
               <DetailRow label="카테고리" value={service.category} />
+              <DetailRow label="환경 타입" value={ENV_TYPE_LABELS[service.env_type]} />
               <DetailRow label="버전" value={`v${service.version}`} />
               <DetailRow label="점수" value={String(service.score)} />
-              <DetailRow label="난이도" value={service.difficulty} />
-              <DetailRow label="Docker 이미지" value={service.docker_image ?? "-"} mono />
-              <DetailRow label="헬스체크 경로" value={service.health_check_endpoint ?? "TCP 체크"} mono={!!service.health_check_endpoint} />
+              {service.env_type !== "connection_info" && (
+                <DetailRow label="Docker 이미지" value={service.docker_image ?? "-"} mono />
+              )}
+              <DetailRow
+                label="헬스체크 방식"
+                value={
+                  getScenarioStepCount(service.healthcheck_scenarios)
+                    ? "시나리오 기반 검증"
+                    : service.health_check_endpoint
+                      ? "엔드포인트 기반 검증"
+                      : "TCP 연결 체크"
+                }
+              />
               <DetailRow label="등록자" value={service.registered_by_name ?? service.registered_by} />
               <DetailRow label="등록일" value={formatDate(service.created_at)} />
               <DetailRow label="승인자" value={service.approved_by_name ?? service.approved_by ?? "-"} />
               <DetailRow label="승인일" value={formatDate(service.approved_at)} />
+            </div>
+
+            <div className="rounded-lg border border-border/60 bg-bg-tertiary/30 p-4 space-y-3">
+              <div className="flex items-center justify-between gap-3">
+                <h3 className="text-sm font-semibold text-text-primary">접속 정보</h3>
+                <span className="text-xs text-text-muted">참가자 안내</span>
+              </div>
+              {service.connection_info ? (
+                <pre className="whitespace-pre-wrap break-words rounded-lg bg-bg-secondary px-3 py-3 text-sm text-text-secondary">
+                  {service.connection_info}
+                </pre>
+              ) : (
+                <p className="text-sm text-text-muted">아직 저장된 접속 정보가 없습니다.</p>
+              )}
+            </div>
+
+            <div className="rounded-lg border border-border/60 bg-bg-tertiary/30 p-4 space-y-3">
+              <div className="flex items-center justify-between gap-3">
+                <h3 className="text-sm font-semibold text-text-primary">플래그 슬롯</h3>
+                <span className="text-xs text-text-muted">{service.flag_slots.length}개</span>
+              </div>
+              <div className="space-y-2">
+                {service.flag_slots.map((slot, index) => (
+                  <div
+                    key={`${slot.slot_key ?? "slot"}-${index}`}
+                    className="flex items-center justify-between gap-3 rounded-lg border border-border/50 bg-bg-secondary px-3 py-2"
+                  >
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-2">
+                        <span className="text-sm font-medium text-text-primary">{slot.label}</span>
+                        <span className="rounded-full bg-bg-tertiary px-2 py-0.5 text-[11px] font-medium text-text-secondary">
+                          {slot.difficulty}
+                        </span>
+                      </div>
+                      <div className="text-xs font-mono text-text-muted">{slot.filename}</div>
+                    </div>
+                    <div className="text-sm font-medium text-text-secondary">{slot.points}점</div>
+                  </div>
+                ))}
+              </div>
             </div>
 
             <div className="pt-2 border-t border-border/50">
@@ -760,9 +956,37 @@ export default function ServiceDetailPage() {
                 </p>
               </div>
             )}
-          </section>
+            </section>
+          )}
 
-          <section className="rounded-xl border border-border bg-bg-secondary p-5 space-y-4">
+          {activeDetailTab === "healthcheck" && (
+            <section className="rounded-xl border border-border bg-bg-secondary p-5 space-y-4">
+              <div className="flex items-center justify-between gap-3">
+                <div>
+                  <h2 className="text-base font-semibold text-text-primary">헬스체크</h2>
+                  <p className="text-sm text-text-muted">
+                    이 문제의 검증 방식과 시나리오 step을 확인합니다.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => openEdit(service, "healthcheck")}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium rounded-lg bg-accent/15 text-accent hover:bg-accent/25"
+                >
+                  <Pencil className="w-4 h-4" />
+                  헬스체크 수정
+                </button>
+              </div>
+
+              <HealthCheckScenarioPanel
+                endpoint={service.health_check_endpoint}
+                scenarios={service.healthcheck_scenarios}
+              />
+            </section>
+          )}
+
+          {activeDetailTab === "deploy" && (
+            <section className="rounded-xl border border-border bg-bg-secondary p-5 space-y-4">
             <div className="flex items-center justify-between">
               <h2 className="text-base font-semibold text-text-primary">배포 현황</h2>
               {service.competition_id && (
@@ -833,7 +1057,14 @@ export default function ServiceDetailPage() {
                             label="실행자"
                             value={selectedPipeline.triggered_by_name ?? selectedPipeline.triggered_by}
                           />
-                          <DetailRow label="시작" value={formatDateTime(selectedPipeline.started_at)} />
+                          <DetailRow
+                            label={selectedPipeline.status === "scheduled" ? "예약 시각" : "시작"}
+                            value={formatDateTime(
+                              selectedPipeline.status === "scheduled"
+                                ? selectedPipeline.scheduled_for
+                                : selectedPipeline.started_at,
+                            )}
+                          />
                           <DetailRow label="완료" value={formatDateTime(selectedPipeline.completed_at)} />
                         </div>
 
@@ -954,12 +1185,18 @@ export default function ServiceDetailPage() {
                               </span>
                             </div>
                             <div className="mt-1 text-[11px] text-text-secondary">
-                              {pipeline.current_stage
+                              {pipeline.status === "scheduled"
+                                ? "예약 배포"
+                                : pipeline.current_stage
                                 ? DEPLOY_STAGE_LABELS[pipeline.current_stage] ?? pipeline.current_stage
                                 : "단계 정보 없음"}
                             </div>
                             <div className="mt-0.5 text-[11px] text-text-muted font-mono">
-                              {formatDateTime(pipeline.started_at ?? pipeline.created_at)}
+                              {formatDateTime(
+                                pipeline.status === "scheduled"
+                                  ? pipeline.scheduled_for
+                                  : (pipeline.started_at ?? pipeline.created_at),
+                              )}
                             </div>
                           </button>
                         ))}
@@ -969,9 +1206,11 @@ export default function ServiceDetailPage() {
                 )}
               </div>
             )}
-          </section>
+            </section>
+          )}
 
-          <section className="rounded-xl border border-border bg-bg-secondary p-5 space-y-4">
+          {activeDetailTab === "flags" && (
+            <section className="rounded-xl border border-border bg-bg-secondary p-5 space-y-4">
             <div className="flex items-center justify-between gap-3">
               <div>
                 <h2 className="text-base font-semibold text-text-primary">플래그</h2>
@@ -979,25 +1218,35 @@ export default function ServiceDetailPage() {
                   이 문제에 연결된 플래그와 제출 기록을 확인합니다.
                 </p>
               </div>
-              {service.competition_id && (
+              <div className="flex items-center gap-2">
                 <button
                   type="button"
-                  onClick={() => {
-                    if (activeFlagTab === "list") fetchFlags();
-                    if (activeFlagTab === "submissions") fetchSubmissions();
-                    if (activeFlagTab === "stats") fetchFlagStats();
-                  }}
-                  className="inline-flex items-center gap-1 text-xs text-text-muted hover:text-text-primary transition-colors"
+                  onClick={() => openEdit(service, "flags")}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium rounded-lg bg-accent/15 text-accent hover:bg-accent/25"
                 >
-                  <RefreshCw
-                    className={cn(
-                      "w-3 h-3",
-                      (isFlagsLoading || isSubmissionsLoading || isFlagStatsLoading) && "animate-spin",
-                    )}
-                  />
-                  새로고침
+                  <Pencil className="w-4 h-4" />
+                  플래그 수정
                 </button>
-              )}
+                {service.competition_id && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (activeFlagTab === "list") fetchFlags();
+                      if (activeFlagTab === "submissions") fetchSubmissions();
+                      if (activeFlagTab === "stats") fetchFlagStats();
+                    }}
+                    className="inline-flex items-center gap-1 text-xs text-text-muted hover:text-text-primary transition-colors"
+                  >
+                    <RefreshCw
+                      className={cn(
+                        "w-3 h-3",
+                        (isFlagsLoading || isSubmissionsLoading || isFlagStatsLoading) && "animate-spin",
+                      )}
+                    />
+                    새로고침
+                  </button>
+                )}
+              </div>
             </div>
 
             {!service.competition_id ? (
@@ -1071,6 +1320,7 @@ export default function ServiceDetailPage() {
                           <tr className="border-b border-border text-left">
                             <th className="px-4 py-3 text-xs font-medium text-text-muted uppercase tracking-wider">라운드</th>
                             <th className="px-4 py-3 text-xs font-medium text-text-muted uppercase tracking-wider">팀</th>
+                            <th className="px-4 py-3 text-xs font-medium text-text-muted uppercase tracking-wider">슬롯</th>
                             <th className="px-4 py-3 text-xs font-medium text-text-muted uppercase tracking-wider">플래그 값</th>
                             <th className="px-4 py-3 text-xs font-medium text-text-muted uppercase tracking-wider">상태</th>
                             <th className="px-4 py-3 text-xs font-medium text-text-muted uppercase tracking-wider">심은 시각</th>
@@ -1080,7 +1330,7 @@ export default function ServiceDetailPage() {
                         <tbody className="divide-y divide-border">
                           {isFlagsLoading && (
                             <tr>
-                              <td colSpan={6} className="px-4 py-12 text-center text-sm text-text-muted">
+                              <td colSpan={7} className="px-4 py-12 text-center text-sm text-text-muted">
                                 <Loader2 className="w-5 h-5 animate-spin mx-auto mb-2" />
                                 플래그 목록을 불러오는 중...
                               </td>
@@ -1088,7 +1338,7 @@ export default function ServiceDetailPage() {
                           )}
                           {!isFlagsLoading && flagItems.length === 0 && (
                             <tr>
-                              <td colSpan={6} className="px-4 py-12 text-center text-sm text-text-muted">
+                              <td colSpan={7} className="px-4 py-12 text-center text-sm text-text-muted">
                                 이 문제에 연결된 플래그가 없습니다.
                               </td>
                             </tr>
@@ -1098,6 +1348,12 @@ export default function ServiceDetailPage() {
                               <tr key={flag.id} className="hover:bg-bg-tertiary transition-colors">
                                 <td className="px-4 py-3 font-mono text-xs text-text-primary">#{flag.round_number}</td>
                                 <td className="px-4 py-3 text-xs text-text-primary">{flag.team_name}</td>
+                                <td className="px-4 py-3">
+                                  <div className="text-xs text-text-primary">{flag.slot_label}</div>
+                                  <div className="font-mono text-[11px] text-text-muted">
+                                    {flag.flag_filename} · {flag.point_value}점
+                                  </div>
+                                </td>
                                 <td className="px-4 py-3">
                                   <code className="font-mono text-xs text-accent bg-accent/10 px-1.5 py-0.5 rounded break-all">
                                     {flag.flag_value}
@@ -1228,6 +1484,7 @@ export default function ServiceDetailPage() {
                             <th className="px-4 py-3 text-xs font-medium text-text-muted uppercase tracking-wider">라운드</th>
                             <th className="px-4 py-3 text-xs font-medium text-text-muted uppercase tracking-wider">제출팀</th>
                             <th className="px-4 py-3 text-xs font-medium text-text-muted uppercase tracking-wider">피해팀</th>
+                            <th className="px-4 py-3 text-xs font-medium text-text-muted uppercase tracking-wider">슬롯</th>
                             <th className="px-4 py-3 text-xs font-medium text-text-muted uppercase tracking-wider">제출 플래그</th>
                             <th className="px-4 py-3 text-xs font-medium text-text-muted uppercase tracking-wider">판정</th>
                             <th className="px-4 py-3 text-xs font-medium text-text-muted uppercase tracking-wider">제출 시각</th>
@@ -1236,7 +1493,7 @@ export default function ServiceDetailPage() {
                         <tbody className="divide-y divide-border">
                           {isSubmissionsLoading && (
                             <tr>
-                              <td colSpan={6} className="px-4 py-12 text-center text-sm text-text-muted">
+                              <td colSpan={7} className="px-4 py-12 text-center text-sm text-text-muted">
                                 <Loader2 className="w-5 h-5 animate-spin mx-auto mb-2" />
                                 제출 기록을 불러오는 중...
                               </td>
@@ -1244,7 +1501,7 @@ export default function ServiceDetailPage() {
                           )}
                           {!isSubmissionsLoading && submissionItems.length === 0 && (
                             <tr>
-                              <td colSpan={6} className="px-4 py-12 text-center text-sm text-text-muted">
+                              <td colSpan={7} className="px-4 py-12 text-center text-sm text-text-muted">
                                 이 문제의 제출 기록이 없습니다.
                               </td>
                             </tr>
@@ -1259,6 +1516,12 @@ export default function ServiceDetailPage() {
                                   </td>
                                   <td className="px-4 py-3 text-xs text-text-primary">{item.submitter_team_name}</td>
                                   <td className="px-4 py-3 text-xs text-text-secondary">{item.target_team_name ?? "-"}</td>
+                                  <td className="px-4 py-3">
+                                    <div className="text-xs text-text-primary">{item.slot_label ?? "-"}</div>
+                                    <div className="font-mono text-[11px] text-text-muted">
+                                      {item.slot_key ?? "-"}{item.points_awarded ? ` · ${item.points_awarded}점` : ""}
+                                    </div>
+                                  </td>
                                   <td className="px-4 py-3">
                                     <code className="font-mono text-xs text-text-secondary bg-bg-tertiary px-1.5 py-0.5 rounded break-all">
                                       {item.submitted_flag}
@@ -1403,11 +1666,11 @@ export default function ServiceDetailPage() {
                 )}
               </>
             )}
-          </section>
-        </div>
+            </section>
+          )}
 
-        <div className="space-y-6">
-          <section className="rounded-xl border border-border bg-bg-secondary p-5 space-y-4">
+          {activeDetailTab === "build" && (
+            <section className="rounded-xl border border-border bg-bg-secondary p-5 space-y-4">
             <h2 className="text-base font-semibold text-text-primary">빌드 상태</h2>
             {service.env_type === "dockerfile" ? (
               <div className="space-y-3">
@@ -1434,29 +1697,38 @@ export default function ServiceDetailPage() {
                 <DetailRow label="환경 타입" value={service.env_type} />
                 <DetailRow label="컨테이너 포트" value={String(service.container_port ?? "-")} />
                 <DetailRow label="점수" value={String(service.score)} />
-                <DetailRow label="난이도" value={service.difficulty} />
+              </div>
+            ) : service.env_type === "connection_info" ? (
+              <div className="space-y-3">
+                <DetailRow label="환경 타입" value={ENV_TYPE_LABELS[service.env_type]} />
+                <DetailRow label="점수" value={String(service.score)} />
+                <div className="rounded-lg border border-border bg-bg-tertiary px-3 py-3 text-sm text-text-muted">
+                  이 문제는 컨테이너 빌드 없이 접속 정보만 제공하는 수동 문제입니다.
+                </div>
               </div>
             ) : (
               <div className="space-y-3">
-                <DetailRow label="환경 타입" value={service.env_type} />
+                <DetailRow label="환경 타입" value={ENV_TYPE_LABELS[service.env_type]} />
                 <DetailRow label="컨테이너 포트" value={String(service.container_port ?? "-")} />
                 <DetailRow label="점수" value={String(service.score)} />
-                <DetailRow label="난이도" value={service.difficulty} />
               </div>
             )}
-          </section>
+            </section>
+          )}
+        </div>
 
+        <div className="space-y-6 xl:sticky xl:top-24 self-start">
           <section className="rounded-xl border border-border bg-bg-secondary p-5 space-y-3">
             <h2 className="text-base font-semibold text-text-primary">작업</h2>
 
             {service.status === "draft" && (
               <>
-                <button
-                  type="button"
-                  onClick={() => openEdit(service)}
-                  disabled={actionLoading !== null}
-                  className="w-full inline-flex items-center justify-center gap-1.5 px-3 py-2 text-sm font-medium rounded-lg bg-accent/15 text-accent hover:bg-accent/25 transition-colors disabled:opacity-50"
-                >
+                  <button
+                    type="button"
+                    onClick={() => openEdit(service, "service")}
+                    disabled={actionLoading !== null}
+                    className="w-full inline-flex items-center justify-center gap-1.5 px-3 py-2 text-sm font-medium rounded-lg bg-accent/15 text-accent hover:bg-accent/25 transition-colors disabled:opacity-50"
+                  >
                   <Pencil className="w-4 h-4" />
                   문제 수정
                 </button>
@@ -1473,6 +1745,21 @@ export default function ServiceDetailPage() {
                       <CheckCircle2 className="w-4 h-4" />
                     )}
                     검증 후 활성화
+                  </button>
+                )}
+                {service.env_type === "connection_info" && (
+                  <button
+                    type="button"
+                    onClick={handleActivate}
+                    disabled={actionLoading !== null}
+                    className="w-full inline-flex items-center justify-center gap-1.5 px-3 py-2 text-sm font-medium rounded-lg bg-status-ok/15 text-status-ok hover:bg-status-ok/25 transition-colors disabled:opacity-50"
+                  >
+                    {actionLoading === "activate" ? (
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                    ) : (
+                      <CheckCircle2 className="w-4 h-4" />
+                    )}
+                    바로 활성화
                   </button>
                 )}
                 {service.env_type === "dockerfile" && service.build_status === "building" && (
@@ -1524,19 +1811,36 @@ export default function ServiceDetailPage() {
 
             {service.status === "active" && (
               <>
-                <button
-                  type="button"
-                  onClick={handleDeploy}
-                  disabled={actionLoading !== null || !service.competition_id}
-                  className="w-full inline-flex items-center justify-center gap-1.5 px-3 py-2 text-sm font-medium rounded-lg bg-status-info/15 text-status-info hover:bg-status-info/25 transition-colors disabled:opacity-50"
-                >
-                  {actionLoading === "deploy" ? (
-                    <Loader2 className="w-4 h-4 animate-spin" />
-                  ) : (
-                    <Rocket className="w-4 h-4" />
-                  )}
-                  배포 시작
-                </button>
+                {service.env_type !== "connection_info" && (
+                  <div className="grid gap-2 sm:grid-cols-2">
+                    <button
+                      type="button"
+                      onClick={handleDeploy}
+                      disabled={actionLoading !== null || !service.competition_id}
+                      className="w-full inline-flex items-center justify-center gap-1.5 px-3 py-2 text-sm font-medium rounded-lg bg-status-info/15 text-status-info hover:bg-status-info/25 transition-colors disabled:opacity-50"
+                    >
+                      {actionLoading === "deploy" ? (
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                      ) : (
+                        <Rocket className="w-4 h-4" />
+                      )}
+                      배포 시작
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setScheduleDeployOpen(true)}
+                      disabled={actionLoading !== null || !service.competition_id}
+                      className="w-full inline-flex items-center justify-center gap-1.5 px-3 py-2 text-sm font-medium rounded-lg bg-status-warning/15 text-status-warning hover:bg-status-warning/25 transition-colors disabled:opacity-50"
+                    >
+                      {actionLoading === "schedule-deploy" ? (
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                      ) : (
+                        <Rocket className="w-4 h-4" />
+                      )}
+                      배포 예약
+                    </button>
+                  </div>
+                )}
                 {service.env_type === "dockerfile" && (
                   <button
                     type="button"
@@ -1551,6 +1855,11 @@ export default function ServiceDetailPage() {
                     )}
                     재빌드
                   </button>
+                )}
+                {service.env_type === "connection_info" && (
+                  <div className="rounded-lg border border-border bg-bg-tertiary px-3 py-2 text-xs text-text-muted">
+                    이 문제는 접속 정보만 제공하는 수동 문제라 배포와 재빌드 작업이 없습니다.
+                  </div>
                 )}
                 <button
                   type="button"
@@ -1579,7 +1888,7 @@ export default function ServiceDetailPage() {
       <Dialog.Root open={editOpen} onOpenChange={setEditOpen}>
         <Dialog.Portal>
           <Dialog.Overlay className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm" />
-          <Dialog.Content className="fixed left-1/2 top-1/2 z-50 w-full max-w-lg max-h-[85vh] -translate-x-1/2 -translate-y-1/2 bg-bg-elevated border border-border rounded-xl shadow-2xl focus:outline-none flex flex-col">
+          <Dialog.Content className="fixed left-1/2 top-1/2 z-50 w-[min(960px,calc(100vw-2rem))] max-h-[85vh] -translate-x-1/2 -translate-y-1/2 bg-bg-elevated border border-border rounded-xl shadow-2xl focus:outline-none flex flex-col">
             <div className="p-6 pb-0 shrink-0">
               <Dialog.Close asChild>
                 <button
@@ -1592,12 +1901,22 @@ export default function ServiceDetailPage() {
               </Dialog.Close>
 
               <Dialog.Title className="text-lg font-semibold text-text-primary pr-8">
-                {service.status === "draft" ? "문제 수정" : "점수/난이도 수정"}
+                {editMode === "service"
+                  ? service.status === "draft"
+                    ? "문제 수정"
+                    : "접속 정보 수정"
+                  : editMode === "healthcheck"
+                    ? "헬스체크 수정"
+                    : "플래그 수정"}
               </Dialog.Title>
               <Dialog.Description className="mt-1 text-sm text-text-secondary">
-                {service.status === "draft"
-                  ? "draft 상태에서는 전체 메타를 수정할 수 있습니다. 저장 시 즉시 반영됩니다."
-                  : "운영 중(active) 문제는 점수와 난이도만 수정할 수 있습니다."}
+                {editMode === "service"
+                  ? service.status === "draft"
+                    ? "문제 기본 메타데이터와 접속 정보를 수정합니다."
+                    : "참가자에게 보여줄 접속 정보만 수정합니다."
+                  : editMode === "healthcheck"
+                    ? "헬스체크 엔드포인트와 시나리오 step을 입력칸으로 수정합니다."
+                    : "플래그 파일명, 점수, 난이도를 슬롯별로 수정합니다."}
               </Dialog.Description>
             </div>
 
@@ -1610,7 +1929,7 @@ export default function ServiceDetailPage() {
                 className="flex flex-col flex-1 min-h-0"
               >
                 <div className="px-6 pt-5 pb-4 space-y-4 overflow-y-auto flex-1">
-                  {service.status === "draft" && (
+                  {editMode === "service" && service.status === "draft" && (
                     <>
                       <FormField label="문제 이름" required>
                         <input
@@ -1637,33 +1956,22 @@ export default function ServiceDetailPage() {
                     </>
                   )}
 
-                  <div className="grid grid-cols-2 gap-3">
-                    <FormField label="점수" required>
-                      <input
-                        type="number"
-                        min={1}
-                        className="form-input"
-                        value={editForm.score}
-                        onChange={(e) => setEditForm({ ...editForm, score: e.target.value })}
-                        placeholder="100"
+                  {editMode === "service" && service.env_type === "connection_info" && (
+                    <FormField label="접속 정보">
+                      <textarea
+                        className="form-input resize-none"
+                        rows={4}
+                        value={editForm.connection_info}
+                        onChange={(e) => setEditForm({ ...editForm, connection_info: e.target.value })}
+                        placeholder={"예: http://10.1.x.10/\n예: nc TEAM_IP 31337\n예: guest / guest1234"}
                       />
+                      <p className="mt-1 text-xs text-text-muted">
+                        참가자에게 전달할 접속 방법을 적습니다. active 상태에서도 이 항목은 수정할 수 있습니다.
+                      </p>
                     </FormField>
-                    <FormField label="난이도" required>
-                      <select
-                        className="form-input"
-                        value={editForm.difficulty}
-                        onChange={(e) => setEditForm({ ...editForm, difficulty: e.target.value })}
-                      >
-                        {DIFFICULTY_OPTIONS.map((opt) => (
-                          <option key={opt.value} value={opt.value}>
-                            {opt.label}
-                          </option>
-                        ))}
-                      </select>
-                    </FormField>
-                  </div>
+                  )}
 
-                  {service.status === "draft" && (
+                  {editMode === "service" && service.status === "draft" && service.env_type !== "connection_info" && (
                     <>
                       <FormField label="Docker 이미지">
                         <input
@@ -1675,16 +1983,22 @@ export default function ServiceDetailPage() {
                         />
                       </FormField>
 
-                      <FormField label="플래그 형식">
-                        <input
-                          type="text"
-                          className="form-input font-mono text-xs"
-                          value={editForm.flag_format}
-                          onChange={(e) => setEditForm({ ...editForm, flag_format: e.target.value })}
-                          placeholder="예: FLAG{...}"
-                        />
-                      </FormField>
+                    </>
+                  )}
 
+                  {editMode === "service" && service.status === "draft" && (
+                    <FormField label="설명">
+                      <textarea
+                        className="form-input resize-none"
+                        rows={3}
+                        value={editForm.description}
+                        onChange={(e) => setEditForm({ ...editForm, description: e.target.value })}
+                      />
+                    </FormField>
+                  )}
+
+                  {editMode === "healthcheck" && (
+                    <>
                       <FormField label="헬스체크 엔드포인트">
                         <input
                           type="text"
@@ -1697,14 +2011,30 @@ export default function ServiceDetailPage() {
                         />
                       </FormField>
 
-                      <FormField label="설명">
-                        <textarea
-                          className="form-input resize-none"
-                          rows={3}
-                          value={editForm.description}
-                          onChange={(e) => setEditForm({ ...editForm, description: e.target.value })}
-                        />
+                      <HealthCheckScenarioEditor
+                        value={editForm.healthcheck_scenarios}
+                        onChange={(healthcheck_scenarios) =>
+                          setEditForm({ ...editForm, healthcheck_scenarios })
+                        }
+                        disabled={isEditSubmitting}
+                      />
+                    </>
+                  )}
+
+                  {editMode === "flags" && (
+                    <>
+                      <FormField label="총점">
+                        <div className="form-input flex items-center justify-between">
+                          <span>{editTotalPoints}점</span>
+                          <span className="text-xs text-text-muted">슬롯별 점수 합계</span>
+                        </div>
                       </FormField>
+
+                      <FlagSlotEditor
+                        slots={editForm.flag_slots}
+                        onChange={(slots) => setEditForm({ ...editForm, flag_slots: slots })}
+                        disabled={isEditSubmitting}
+                      />
                     </>
                   )}
                 </div>
@@ -1720,7 +2050,7 @@ export default function ServiceDetailPage() {
                   </Dialog.Close>
                   <button
                     type="submit"
-                    disabled={isEditSubmitting || !editForm.name.trim()}
+                    disabled={isEditSubmitting || (editMode === "service" && !editForm.name.trim())}
                     className="px-4 py-2 text-sm font-medium rounded-lg bg-accent hover:bg-accent/80 text-white transition-colors disabled:opacity-50"
                   >
                     {isEditSubmitting ? "저장 중..." : "저장"}
@@ -1728,6 +2058,74 @@ export default function ServiceDetailPage() {
                 </div>
               </form>
             )}
+          </Dialog.Content>
+        </Dialog.Portal>
+      </Dialog.Root>
+
+      <Dialog.Root open={scheduleDeployOpen} onOpenChange={setScheduleDeployOpen}>
+        <Dialog.Portal>
+          <Dialog.Overlay className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm" />
+          <Dialog.Content className="fixed left-1/2 top-1/2 z-50 w-[min(520px,calc(100vw-2rem))] -translate-x-1/2 -translate-y-1/2 rounded-xl border border-border bg-bg-elevated shadow-2xl focus:outline-none">
+            <div className="border-b border-border px-6 py-5">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <Dialog.Title className="text-lg font-semibold text-text-primary">
+                    배포 예약
+                  </Dialog.Title>
+                  <Dialog.Description className="mt-1 text-sm text-text-secondary">
+                    원하는 시각을 지정하면 운영포털이 해당 시각에 자동으로 배포를 시작합니다.
+                  </Dialog.Description>
+                </div>
+                <Dialog.Close asChild>
+                  <button
+                    type="button"
+                    className="rounded-md p-1 text-text-muted hover:bg-bg-tertiary hover:text-text-primary"
+                    aria-label="닫기"
+                  >
+                    <X className="h-4 w-4" />
+                  </button>
+                </Dialog.Close>
+              </div>
+            </div>
+
+            <div className="space-y-4 px-6 py-5">
+              <label className="block space-y-2">
+                <span className="text-sm font-medium text-text-primary">예약 시각</span>
+                <input
+                  type="datetime-local"
+                  value={scheduledForInput}
+                  onChange={(e) => setScheduledForInput(e.target.value)}
+                  className="w-full rounded-lg border border-border bg-bg-secondary px-3 py-2 text-sm text-text-primary outline-none focus:border-accent"
+                />
+              </label>
+              <p className="text-xs text-text-muted">
+                예약 시각이 되면 승인된 팀 전체를 대상으로 현재 문제 이미지를 배포합니다.
+              </p>
+            </div>
+
+            <div className="flex items-center justify-end gap-2 border-t border-border px-6 py-4">
+              <Dialog.Close asChild>
+                <button
+                  type="button"
+                  className="inline-flex items-center justify-center rounded-lg px-4 py-2 text-sm font-medium text-text-secondary hover:bg-bg-tertiary hover:text-text-primary"
+                >
+                  취소
+                </button>
+              </Dialog.Close>
+              <button
+                type="button"
+                onClick={handleScheduleDeploy}
+                disabled={actionLoading !== null || !service?.competition_id}
+                className="inline-flex items-center justify-center gap-1.5 rounded-lg bg-status-warning/15 px-4 py-2 text-sm font-medium text-status-warning hover:bg-status-warning/25 disabled:opacity-50"
+              >
+                {actionLoading === "schedule-deploy" ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <Rocket className="h-4 w-4" />
+                )}
+                예약 저장
+              </button>
+            </div>
           </Dialog.Content>
         </Dialog.Portal>
       </Dialog.Root>

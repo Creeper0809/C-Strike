@@ -52,8 +52,38 @@ class Settings(BaseSettings):
     # SSH 비밀번호 암호화 키 (Fernet, 32바이트 base64)
     SSH_ENCRYPTION_KEY: str = "your-fernet-key-change-in-production"
 
-    # 운영 포털 팀 생성 시 사용할 사전 준비 슬롯 풀(JSON 배열)
+    # 운영 포털 팀 생성 시 사용할 사전 준비 슬롯 풀(JSON 배열, legacy fallback)
     TEAM_SLOT_POOL_JSON: str = ""
+    TEAM_SLOT_INVENTORY_FILENAME: str = "team-slots.csv"
+    TEAM_SLOT_DEFAULT_SSH_PORT: int = 22
+    TEAM_SLOT_DEFAULT_SSH_USER: str = ""
+    TEAM_SLOT_DEFAULT_SSH_PASSWORD: str = ""
+
+    # 라우터 네트워크 자동화 (팀 삭제 시 실제 VPN/iptables 정리)
+    NETWORK_TEAM_DELETE_ENABLED: bool = False
+    NETWORK_TEAM_DELETE_HOST: str = ""
+    NETWORK_TEAM_DELETE_PORT: int = 22
+    NETWORK_TEAM_DELETE_USER: str = ""
+    NETWORK_TEAM_DELETE_PASSWORD: str = ""
+    NETWORK_TEAM_DELETE_ROOT: str = "/home/user/network"
+    NETWORK_TEAM_DELETE_USE_SUDO: bool = True
+    NETWORK_TEAM_DELETE_TIMEOUT_SECONDS: int = 120
+    NETWORK_TEAM_DELETE_EXECUTE_USERS: bool = True
+    NETWORK_TEAM_DELETE_PURGE_USERS: bool = False
+    NETWORK_TEAM_DELETE_RELEASE_IP: bool = False
+
+    # 라우터 네트워크 자동화 (팀 생성 시 실제 VPN/iptables 생성)
+    NETWORK_TEAM_PROVISION_ENABLED: bool = False
+    NETWORK_TEAM_PROVISION_HOST: str = ""
+    NETWORK_TEAM_PROVISION_PORT: int = 22
+    NETWORK_TEAM_PROVISION_USER: str = ""
+    NETWORK_TEAM_PROVISION_PASSWORD: str = ""
+    NETWORK_TEAM_PROVISION_ROOT: str = "/home/user/network"
+    NETWORK_TEAM_PROVISION_USE_SUDO: bool = True
+    NETWORK_TEAM_PROVISION_TIMEOUT_SECONDS: int = 120
+    NETWORK_TEAM_PROVISION_EXECUTE_USERS: bool = True
+    NETWORK_TEAM_PROVISION_REUSE_RETIRED: bool = True
+    NETWORK_TEAM_PROVISION_USERS_PER_TEAM: int = 0
 
     model_config = {"env_file": ".env"}
 

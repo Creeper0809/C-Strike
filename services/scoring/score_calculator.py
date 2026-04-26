@@ -213,18 +213,71 @@ class ScoreCalculator:
 
     @staticmethod
     async def _calc_attack_score(session, team_id: UUID, round_id: UUID) -> Decimal:
-        """공격 점수: 해당 라운드에서 correct 판정받은 고유 플래그 수."""
+        """공격 점수: 해당 라운드 창에서 탈취한 고유 플래그의 점수 합.
+
+        기존 구현은 ``flags.round_id == 현재 round_id`` 인 플래그만 세어,
+        라운드 사이 공백 구간에 제출된 정답 플래그가 다음 라운드 점수에
+        반영되지 않는 문제가 있었다.
+
+        이제는 현재 라운드의 scoring window 를
+
+        - 시작: 직전 completed 라운드의 ``completed_at`` (없으면 현재 라운드 ``started_at``)
+        - 종료: 현재 라운드 ``completed_at`` (없으면 ``NOW()``)
+
+        로 정의하고, 그 시간창 안에 들어온 correct 제출을 집계한다.
+        """
+        window_result = await session.execute(
+            text("""
+                WITH current_round AS (
+                    SELECT competition_id, round_number, started_at, completed_at
+                    FROM scoring_rounds
+                    WHERE id = :round_id
+                ),
+                previous_round AS (
+                    SELECT sr.completed_at
+                    FROM scoring_rounds sr
+                    JOIN current_round cr
+                      ON sr.competition_id = cr.competition_id
+                    WHERE sr.status = 'completed'
+                      AND sr.round_number = cr.round_number - 1
+                    LIMIT 1
+                )
+                SELECT
+                    COALESCE(
+                        (SELECT completed_at FROM previous_round),
+                        (SELECT started_at FROM current_round),
+                        NOW()
+                    ) AS window_start,
+                    COALESCE(
+                        (SELECT completed_at FROM current_round),
+                        NOW()
+                    ) AS window_end
+            """),
+            {"round_id": round_id},
+        )
+        window = window_result.fetchone()
+        if window is None:
+            return Decimal("0")
+
         result = await session.execute(
             text("""
-                SELECT COUNT(DISTINCT fs.flag_id) AS attack_score
-                FROM flag_submissions fs
-                JOIN flags f ON fs.flag_id = f.id
-                WHERE fs.submitter_team_id = :team_id
-                  AND fs.verdict = 'correct'
-                  AND f.round_id = :round_id
-                  AND f.team_id != :team_id
+                SELECT COALESCE(SUM(captured.points), 0) AS attack_score
+                FROM (
+                    SELECT DISTINCT fs.flag_id, COALESCE(fs.points_awarded, f.point_value, 0) AS points
+                    FROM flag_submissions fs
+                    JOIN flags f ON fs.flag_id = f.id
+                    WHERE fs.submitter_team_id = :team_id
+                      AND fs.verdict = 'correct'
+                      AND fs.submitted_at > :window_start
+                      AND fs.submitted_at <= :window_end
+                      AND f.team_id != :team_id
+                ) captured
             """),
-            {"team_id": team_id, "round_id": round_id},
+            {
+                "team_id": team_id,
+                "window_start": window.window_start,
+                "window_end": window.window_end,
+            },
         )
         val = result.scalar()
         return Decimal(str(val)) if val else Decimal("0")
@@ -233,55 +286,53 @@ class ScoreCalculator:
     async def _calc_defense_score(
         session, team_id: UUID, round_id: UUID, total_teams: int, total_services: int
     ) -> Decimal:
-        """방어 점수: 서비스별 (N-1 - stolen_count) / (N-1) 의 평균.
+        """방어 점수: 현재 라운드의 플래그 슬롯별 (N-1 - stolen_count) / (N-1) 의 평균.
 
-        N = 전체 팀 수, S = 전체 서비스 수
+        다중 플래그 슬롯이 있으므로 서비스 단위가 아니라 실제 플래그 단위로 계산한다.
         """
-        if total_teams <= 1 or total_services <= 0:
+        if total_teams <= 1:
             return Decimal("1")
 
         n_minus_1 = Decimal(str(total_teams - 1))
 
-        # 서비스별 탈취한 고유 팀 수
+        flag_rows = await session.execute(
+            text("""
+                SELECT id
+                FROM flags
+                WHERE team_id = :team_id
+                  AND round_id = :round_id
+            """),
+            {"team_id": team_id, "round_id": round_id},
+        )
+        flag_ids = [row.id for row in flag_rows.fetchall()]
+        if not flag_ids:
+            return Decimal("1")
+
+        # 플래그별 탈취한 고유 팀 수
         result = await session.execute(
             text("""
-                SELECT f.service_id, COUNT(DISTINCT fs.submitter_team_id) AS stolen_count
+                SELECT f.id AS flag_id, COUNT(DISTINCT fs.submitter_team_id) AS stolen_count
                 FROM flag_submissions fs
                 JOIN flags f ON fs.flag_id = f.id
                 WHERE f.team_id = :team_id
                   AND f.round_id = :round_id
                   AND fs.verdict = 'correct'
                   AND fs.submitter_team_id != :team_id
-                GROUP BY f.service_id
+                GROUP BY f.id
             """),
             {"team_id": team_id, "round_id": round_id},
         )
         stolen_map: dict[UUID, int] = {}
         for row in result.fetchall():
-            stolen_map[row.service_id] = row.stolen_count
-
-        # 서비스별 방어 점수 합산
-        total_defense = Decimal("0")
-        for _ in range(total_services):
-            # stolen_map에 없는 서비스는 탈취 0건 → 방어 점수 1.0
-            pass
-
-        # 모든 활성 서비스 ID 목록을 조회해서 정확히 계산
-        svc_result = await session.execute(
-            text("""
-                SELECT id FROM vuln_services
-                WHERE status = 'active'
-            """)
-        )
-        service_ids = [row.id for row in svc_result.fetchall()]
+            stolen_map[row.flag_id] = row.stolen_count
 
         total_defense = Decimal("0")
-        for svc_id in service_ids:
-            stolen_count = Decimal(str(stolen_map.get(svc_id, 0)))
+        for flag_id in flag_ids:
+            stolen_count = Decimal(str(stolen_map.get(flag_id, 0)))
             d_s = max(Decimal("0"), (n_minus_1 - stolen_count) / n_minus_1)
             total_defense += d_s
 
-        defense_score = total_defense / Decimal(str(total_services))
+        defense_score = total_defense / Decimal(str(len(flag_ids)))
         return defense_score.quantize(Decimal("0.0001"))
 
     @staticmethod

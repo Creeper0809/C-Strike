@@ -17,6 +17,10 @@ class FlagItem(BaseModel):
     team_name: str
     service_id: UUID
     service_name: str
+    slot_key: str
+    slot_label: str
+    flag_filename: str
+    point_value: int
     flag_value: str
     is_active: bool
     planted_at: datetime | None = None
@@ -46,6 +50,9 @@ class FlagSubmissionItem(BaseModel):
     target_team_name: str | None = None
     service_id: UUID | None = None
     service_name: str | None = None
+    slot_key: str | None = None
+    slot_label: str | None = None
+    points_awarded: int | None = None
     submitted_flag: str
     verdict: str
     submitter_discord_id: str | None = None
@@ -76,6 +83,9 @@ class FlagSubmissionDetail(BaseModel):
     target_team_name: str | None = None
     service_id: UUID | None = None
     service_name: str | None = None
+    slot_key: str | None = None
+    slot_label: str | None = None
+    points_awarded: int | None = None
     submitted_flag: str
     flag_id: UUID | None = None
     verdict: str

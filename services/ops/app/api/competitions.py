@@ -38,10 +38,10 @@ EARLY_STATUS_TRANSITIONS = {
 }
 
 FIELD_ALLOWED_STATUSES: dict[str, set[str]] = {
-    "name": {"draft", "registration"},
+    "name": {"draft", "registration", "ready", "running", "paused", "finished", "archived"},
     "description": {"draft", "registration", "ready", "running", "paused", "finished", "archived"},
-    "scheduled_start_at": {"draft", "registration", "ready"},
-    "scheduled_end_at": {"draft", "registration", "ready"},
+    "scheduled_start_at": {"draft", "registration", "ready", "running", "paused"},
+    "scheduled_end_at": {"draft", "registration", "ready", "running", "paused"},
     "scoring_round_interval_seconds": {"draft", "registration", "ready", "running", "paused", "finished", "archived"},
     "max_teams": {"draft", "registration"},
     "max_members_per_team": {"draft", "registration"},

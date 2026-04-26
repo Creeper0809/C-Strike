@@ -40,12 +40,12 @@ PIPELINE_STAGES = [
 ]
 
 
-def _build_stages(pipeline_id) -> list[DeployStage]:
+def _build_stages(pipeline_id, *, start_immediately: bool = True) -> list[DeployStage]:
     """파이프라인에 속하는 5개 단계 ORM 객체를 생성한다."""
     now = datetime.now(timezone.utc)
     stages: list[DeployStage] = []
     for defn in PIPELINE_STAGES:
-        is_first = defn["stage_order"] == 1
+        is_first = start_immediately and defn["stage_order"] == 1
         stage = DeployStage(
             pipeline_id=pipeline_id,
             stage_name=defn["stage_name"],
@@ -55,6 +55,46 @@ def _build_stages(pipeline_id) -> list[DeployStage]:
         )
         stages.append(stage)
     return stages
+
+
+async def activate_scheduled_pipeline(
+    db: AsyncSession,
+    pipeline: DeployPipeline,
+) -> None:
+    """scheduled 파이프라인을 running으로 전환하고 첫 단계를 시작 상태로 만든다."""
+    if pipeline.status != "scheduled":
+        return
+
+    now = datetime.now(timezone.utc)
+    pipeline.status = "running"
+    pipeline.current_stage = "register"
+    pipeline.started_at = now
+    pipeline.completed_at = None
+    pipeline.error_detail = None
+
+    await db.execute(
+        sa_update(DeployStage)
+        .where(DeployStage.pipeline_id == pipeline.id)
+        .values(
+            status="pending",
+            started_at=None,
+            completed_at=None,
+            error_detail=None,
+        )
+    )
+    await db.execute(
+        sa_update(DeployStage)
+        .where(
+            DeployStage.pipeline_id == pipeline.id,
+            DeployStage.stage_name == "register",
+        )
+        .values(
+            status="running",
+            started_at=now,
+            completed_at=None,
+            error_detail=None,
+        )
+    )
 
 
 async def _resolve_names(
@@ -140,7 +180,9 @@ def _build_service_payload(service: VulnService) -> dict:
         "docker_image": service.docker_image,
         "container_port": service.container_port or 80,
         "health_check_endpoint": service.health_check_endpoint,
+        "healthcheck_scenarios": service.healthcheck_scenarios,
         "env_vars": env_vars,
+        "flag_slots": service.flag_slots,
     }
 
 
@@ -232,7 +274,8 @@ async def start_pipeline(
 
     대상 서비스가 active 상태이고, 해당 대회에 승인된 팀이 1개 이상 있어야 한다.
     승인 팀이 없으면 0/0 팀 배포라는 의미 없는 빈 로그가 남으므로 시작 시점에 거부한다.
-    5개 단계가 자동 생성되고 deploy-service가 백그라운드로 실제 배포를 진행한다.
+    scheduled_for가 미래 시각이면 예약 배포 파이프라인을 만들고, 해당 시각에 자동 실행된다.
+    그 외에는 즉시 5개 단계가 자동 생성되고 deploy-service가 실제 배포를 진행한다.
     """
     # 1) 서비스 존재 및 상태 검증
     svc_result = await db.execute(
@@ -255,31 +298,40 @@ async def start_pipeline(
 
     # 3) 파이프라인 생성
     now = datetime.now(timezone.utc)
+    scheduled_for = body.scheduled_for
+    start_immediately = scheduled_for is None or scheduled_for <= now
     pipeline = DeployPipeline(
         service_id=service.id,
         triggered_by=current_operator.id,
-        status="running",
-        current_stage="register",
-        started_at=now,
+        status="running" if start_immediately else "scheduled",
+        current_stage="register" if start_immediately else None,
+        scheduled_for=scheduled_for if not start_immediately else None,
+        started_at=now if start_immediately else None,
     )
     db.add(pipeline)
     await db.flush()  # pipeline.id 확보
 
     # 4) 5개 단계 자동 생성
-    stages = _build_stages(pipeline.id)
+    stages = _build_stages(pipeline.id, start_immediately=start_immediately)
     db.add_all(stages)
 
     # 5) 감사 로그
     await record_audit(
         db, current_operator, "ops.deploy.start",
         "pipeline", pipeline.id,
-        {"service_id": str(body.service_id), "team_count": len(teams)},
+        {
+            "service_id": str(body.service_id),
+            "team_count": len(teams),
+            "mode": "immediate" if start_immediately else "scheduled",
+            "scheduled_for": scheduled_for.isoformat() if scheduled_for and not start_immediately else None,
+        },
         request.client.host if request.client else None,
     )
     await db.commit()
 
-    # 6) deploy-service에 실제 배포 위임
-    await _dispatch_deployment(db, pipeline, service, teams)
+    # 6) 즉시 배포일 때만 deploy-service에 실제 배포 위임
+    if start_immediately:
+        await _dispatch_deployment(db, pipeline, service, teams)
 
     # 7) 응답 조립
     await db.refresh(pipeline)

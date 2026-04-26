@@ -1,6 +1,7 @@
 """배포 파이프라인 — 5단계 배포 로직 (SSH 원격 배포)"""
 import asyncio
 import json
+import ipaddress
 import re
 import shlex
 import time
@@ -11,6 +12,7 @@ import redis
 import requests
 
 from app.config import settings
+from app.health_contract import run_health_contract
 from app.ssh_executor import SSHExecutor, save_docker_image, validate_ssh_credentials
 
 _executor = ThreadPoolExecutor(max_workers=4)
@@ -39,7 +41,9 @@ class ServiceInfo:
     docker_image: str
     container_port: int
     health_check_endpoint: str | None = None
+    healthcheck_scenarios: dict | None = None
     env_vars: dict | None = None
+    flag_slots: list[dict] | None = None
 
 
 @dataclass
@@ -105,6 +109,86 @@ def _safe_service_slug(name: str) -> str:
     """Docker 컨테이너 이름에 쓸 수 있는 안전한 서비스 slug를 만든다."""
     slug = re.sub(r"[^a-z0-9._-]+", "-", name.lower()).strip("-")
     return slug or "service"
+
+
+def _safe_team_runtime_slug(team_code: str) -> str:
+    """런타임 리소스 이름에 쓸 수 있는 안전한 팀 slug를 만든다."""
+    slug = re.sub(r"[^a-z0-9._-]+", "-", (team_code or "").lower()).strip("-")
+    return slug or "team"
+
+
+def _sanitize_flag_filename(value: str | None, fallback_key: str) -> str:
+    raw = (value or "").strip()
+    if not raw:
+        raw = f"flag-{fallback_key}.txt"
+    name = raw.rsplit("/", 1)[-1].replace("\\", "")
+    name = re.sub(r"[^A-Za-z0-9._-]+", "-", name).strip("-.")
+    if not name:
+        name = f"flag-{fallback_key}.txt"
+    if not name.lower().endswith(".txt"):
+        name = f"{name}.txt"
+    return name
+
+
+def _normalize_flag_slots(service: ServiceInfo) -> list[dict]:
+    slots = service.flag_slots or [
+        {
+            "slot_key": "flag-1",
+            "label": "플래그 1",
+            "filename": "flag.txt",
+            "points": 100,
+        }
+    ]
+    normalized: list[dict] = []
+    for index, slot in enumerate(slots):
+        slot = slot or {}
+        slot_key = re.sub(
+            r"[^a-z0-9._-]+",
+            "-",
+            str(slot.get("slot_key") or slot.get("filename") or slot.get("label") or f"flag-{index+1}").strip().lower(),
+        ).strip("-") or f"flag-{index+1}"
+        normalized.append(
+            {
+                "slot_key": slot_key,
+                "label": str(slot.get("label") or f"플래그 {index + 1}").strip() or f"플래그 {index + 1}",
+                "filename": _sanitize_flag_filename(slot.get("filename"), slot_key),
+                "points": int(slot.get("points") or 100),
+            }
+        )
+    return normalized
+
+
+def _container_name(team: TeamInfo, service: ServiceInfo) -> str:
+    return f"cstrike-{_safe_team_runtime_slug(team.team_code)}-{_safe_service_slug(service.name)}"
+
+
+def _derive_battlefield_bind_ip(team: TeamInfo) -> str:
+    """팀 서버의 경기망 서비스 바인딩 IP를 계산한다.
+
+    우선순위:
+    1) 팀 VPN subnet(예: 10.88.1.0/24) 의 3번째 옥텟을 재사용해 10.1.<n>.10 생성
+    2) gateway_ip(예: 10.2.1.10) 를 같은 호스트의 10.1.<n>.10 으로 변환
+    3) 불가능하면 모든 인터페이스(0.0.0.0) 바인딩으로 fallback
+    """
+    if team.subnet:
+        try:
+            net = ipaddress.ip_network(team.subnet, strict=False)
+            octets = str(net.network_address).split(".")
+            if len(octets) == 4:
+                return f"10.1.{int(octets[2])}.10"
+        except ValueError:
+            pass
+
+    if team.gateway_ip:
+        try:
+            addr = ipaddress.ip_address(team.gateway_ip)
+            octets = str(addr).split(".")
+            if len(octets) == 4:
+                return f"10.1.{int(octets[2])}.10"
+        except ValueError:
+            pass
+
+    return "0.0.0.0"
 
 
 # ──────────────────────────────────────────────
@@ -194,18 +278,35 @@ def stage_prepare_sync(service: ServiceInfo, teams: list[TeamInfo]) -> StageResu
 
 
 def build_run_command(service: ServiceInfo, team: TeamInfo) -> str:
-    """docker run 명령어를 구성한다. 플래그 파일은 read-only 마운트."""
-    container_name = f"cstrike-{team.team_code}-{_safe_service_slug(service.name)}"
-    flag_path = f"{FLAG_BASE_DIR}/{container_name}/flag.txt"
+    """docker run 명령어를 구성한다. 플래그 디렉터리는 read-only 마운트."""
+    container_name = _container_name(team, service)
+    flag_dir = f"{FLAG_BASE_DIR}/{container_name}"
+    flag_slots = _normalize_flag_slots(service)
+    canonical_flag = flag_slots[0]
+    canonical_flag_path = f"{flag_dir}/{canonical_flag['filename']}"
     host_port = service.container_port
+    bind_ip = _derive_battlefield_bind_ip(team)
+
+    runtime_env = {
+        "CSTRIKE_TEAM_ID": team.team_id,
+        "CSTRIKE_TEAM_CODE": team.team_code,
+        "CSTRIKE_TEAM_NAME": team.name,
+        "CSTRIKE_TEAM_SUBNET": team.subnet or "",
+        "CSTRIKE_TEAM_GATEWAY_IP": team.gateway_ip or "",
+        "CSTRIKE_COMPETITION_ID": team.competition_id,
+        "CSTRIKE_SERVICE_ID": service.service_id,
+        "CSTRIKE_SERVICE_NAME": service.name,
+    }
+    if service.env_vars:
+        runtime_env.update(service.env_vars)
 
     env_args = ""
-    if service.env_vars:
-        for k, v in service.env_vars.items():
-            env_args += f" -e {shlex.quote(f'{k}={v}')}"
+    for k, v in runtime_env.items():
+        env_args += f" -e {shlex.quote(f'{k}={v}')}"
 
     quoted_name = shlex.quote(container_name)
-    quoted_flag_path = shlex.quote(flag_path)
+    quoted_flag_dir = shlex.quote(flag_dir)
+    quoted_canonical_flag_path = shlex.quote(canonical_flag_path)
     quoted_team_id = shlex.quote(team.team_id)
     quoted_team_code = shlex.quote(team.team_code)
     quoted_service_id = shlex.quote(service.service_id)
@@ -217,8 +318,9 @@ def build_run_command(service: ServiceInfo, team: TeamInfo) -> str:
         f"docker run -d"
         f" --name {quoted_name}"
         f" --restart unless-stopped"
-        f" -p {host_port}:{service.container_port}"
-        f" -v {quoted_flag_path}:/flag.txt:ro"
+        f" -p {bind_ip}:{host_port}:{service.container_port}"
+        f" -v {quoted_flag_dir}:/flags:ro"
+        f" -v {quoted_canonical_flag_path}:/flag.txt:ro"
         f"{env_args}"
         f" --label cstrike-service=true"
         f" --label cstrike-team-id={quoted_team_id}"
@@ -232,21 +334,63 @@ def build_run_command(service: ServiceInfo, team: TeamInfo) -> str:
 
 def _deploy_to_team(service: ServiceInfo, team: TeamInfo) -> dict:
     """단일 팀 서버에 SSH로 접속하여 Docker 컨테이너를 배포한다."""
-    container_name = f"cstrike-{team.team_code}-{_safe_service_slug(service.name)}"
+    container_name = _container_name(team, service)
     host_port = service.container_port
+    bind_ip = _derive_battlefield_bind_ip(team)
     flag_dir = f"{FLAG_BASE_DIR}/{container_name}"
+    flag_slots = _normalize_flag_slots(service)
 
     with SSHExecutor(team.gateway_ip, team.ssh_port, team.ssh_user, team.ssh_password) as ssh:
         ssh.exec(f"docker rm -f {container_name} 2>/dev/null || true")
-        ssh.exec(f"mkdir -p {flag_dir} && touch {flag_dir}/flag.txt")
+        prep_parts = [f"mkdir -p {shlex.quote(flag_dir)}", f"chmod 755 {shlex.quote(flag_dir)}"]
+        for slot in flag_slots:
+            slot_path = f"{flag_dir}/{slot['filename']}"
+            placeholder_flag = (
+                f"FLAG{{bootstrap-{_safe_team_runtime_slug(team.team_code)}-{_safe_service_slug(service.name)}-{slot['slot_key']}}}"
+            )
+            prep_parts.extend(
+                [
+                    f"if [ -d {shlex.quote(slot_path)} ]; then rm -rf {shlex.quote(slot_path)}; fi",
+                    f"touch {shlex.quote(slot_path)}",
+                    f"if [ ! -s {shlex.quote(slot_path)} ]; then printf '%s\\n' {shlex.quote(placeholder_flag)} > {shlex.quote(slot_path)}; fi",
+                    f"chown {shlex.quote(team.ssh_user)}:{shlex.quote(team.ssh_user)} {shlex.quote(slot_path)}",
+                    f"chmod 664 {shlex.quote(slot_path)}",
+                ]
+            )
+        prep_parts.append(
+            f"chown {shlex.quote(team.ssh_user)}:{shlex.quote(team.ssh_user)} {shlex.quote(flag_dir)}"
+        )
+        prep_inner = " && ".join(prep_parts)
+        prep_cmd = (
+            f"printf '%s\\n' {shlex.quote(team.ssh_password)} | "
+            f"sudo -S -p '' sh -lc {shlex.quote(prep_inner)}"
+        )
+        prep_result = ssh.exec(prep_cmd)
+        if not prep_result.success:
+            raise RuntimeError(f"flag 경로 준비 실패: {prep_result.stderr.strip()}")
         run_cmd = build_run_command(service, team)
         result = ssh.exec(run_cmd)
         if not result.success:
             raise RuntimeError(f"docker run 실패: {result.stderr.strip()}")
         container_id = result.stdout.strip()[:12]
+        post_setup_cmd = """
+if [ -x /docker-entrypoint.d/40-cstrike-setup.sh ]; then
+  /docker-entrypoint.d/40-cstrike-setup.sh
+elif [ -x /usr/local/bin/40-cstrike-bootstrap.sh ]; then
+  /usr/local/bin/40-cstrike-bootstrap.sh
+else
+  exit 0
+fi
+""".strip()
+        post_setup = ssh.exec(
+            f"docker exec {shlex.quote(container_name)} sh -lc "
+            f"{shlex.quote(post_setup_cmd)}"
+        )
+        if not post_setup.success:
+            raise RuntimeError(f"컨테이너 후처리 실패: {post_setup.stderr.strip()}")
 
     _update_team_service(team.team_id, service.service_id, {
-        "host_ip": team.gateway_ip,
+        "host_ip": bind_ip,
         "port": host_port,
         "container_id": container_id,
         "status": "running",
@@ -297,7 +441,8 @@ def stage_verify_sync(service: ServiceInfo, teams: list[TeamInfo]) -> StageResul
     total_count = len(teams)
     logs = []
     for team in teams:
-        container_name = f"cstrike-{team.team_code}-{_safe_service_slug(service.name)}"
+        container_name = _container_name(team, service)
+        bind_ip = _derive_battlefield_bind_ip(team)
         try:
             with SSHExecutor(team.gateway_ip, team.ssh_port, team.ssh_user, team.ssh_password) as ssh:
                 result = ssh.exec(f"docker inspect --format '{{{{.State.Status}}}}' {container_name}")
@@ -308,10 +453,22 @@ def stage_verify_sync(service: ServiceInfo, teams: list[TeamInfo]) -> StageResul
                 if container_status != "running":
                     logs.append(f"  {team.team_code}: 실행 중이 아님 (상태: {container_status})")
                     continue
-                if service.health_check_endpoint:
+                if service.healthcheck_scenarios and service.healthcheck_scenarios.get("steps"):
+                    ok, _, scenario_error = asyncio.run(
+                        run_health_contract(
+                            f"http://{bind_ip}:{service.container_port}",
+                            service.healthcheck_scenarios,
+                        )
+                    )
+                    if ok:
+                        healthy_count += 1
+                        logs.append(f"  {team.team_code}: 시나리오 검증 성공")
+                    else:
+                        logs.append(f"  {team.team_code}: 시나리오 검증 실패 ({scenario_error})")
+                elif service.health_check_endpoint:
                     hc_cmd = (
                         f"curl -sf -o /dev/null -w '%{{http_code}}'"
-                        f" http://localhost:{service.container_port}{service.health_check_endpoint}"
+                        f" http://{bind_ip}:{service.container_port}{service.health_check_endpoint}"
                         f" --connect-timeout 5 --max-time 10"
                     )
                     hc_result = ssh.exec(hc_cmd)

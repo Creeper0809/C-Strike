@@ -1,7 +1,7 @@
 """팀(Team) 관련 Pydantic 스키마."""
 
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, Field
@@ -158,6 +158,55 @@ class TeamMemberCreateResponse(TeamMemberItem):
     team_id: UUID
     team_name: str
     message: str
+    vpn_username: str | None = None
+    vpn_ip: str | None = None
+    generated_vpn_password: str | None = None
+    vpn_credentials_issued: bool = False
+
+
+class TeamMemberRemoveResponse(TeamMemberItem):
+    """팀원 퇴장/삭제 응답."""
+
+    team_id: UUID
+    team_name: str
+    message: str
+    vpn_username: str | None = None
+    vpn_disabled: bool = False
+
+
+class TeamMutationItem(BaseModel):
+    """팀 관련 작업 이력 아이템."""
+
+    id: UUID
+    operation_type: str
+    status: str
+    requested_by_name: str
+    payload: dict[str, Any] | None = None
+    result: dict[str, Any] | None = None
+    error_detail: str | None = None
+    started_at: datetime
+    completed_at: datetime | None = None
+    retryable: bool = False
+
+    model_config = {"from_attributes": True}
+
+
+class TeamMutationListResponse(BaseModel):
+    """팀 작업 이력 목록 응답."""
+
+    team_id: UUID
+    team_name: str
+    items: list[TeamMutationItem]
+    total: int
+
+
+class TeamMutationRetryResponse(BaseModel):
+    """팀 작업 이력 재시도 응답."""
+
+    mutation_id: UUID
+    operation_type: str
+    message: str
+    team_deleted: bool = False
 
 
 # ── 팀 서비스 ────────────────────────────────────────────
@@ -173,8 +222,39 @@ class TeamServiceItem(BaseModel):
     status: str
     last_health_check_at: datetime | None = None
     last_health_check_result: bool | None = None
+    health_check_endpoint: str | None = None
+    healthcheck_scenarios: dict[str, Any] | None = None
+    last_health_check_type: str | None = None
+    last_health_check_error: str | None = None
+    last_health_check_response_time_ms: int | None = None
 
     model_config = {"from_attributes": True}
+
+
+class TeamServiceHealthcheckStepResult(BaseModel):
+    """실시간 팀 서비스 헬스체크 step 결과."""
+
+    step_index: int
+    name: str
+    request_label: str
+    status: Literal["passed", "failed", "not_run"]
+    response_time_ms: int | None = None
+    error_message: str | None = None
+
+
+class TeamServiceHealthcheckLiveResponse(BaseModel):
+    """팀 서비스에 대한 실시간 헬스체크 응답."""
+
+    team_id: UUID
+    team_service_id: UUID
+    service_id: UUID
+    service_name: str
+    check_type: str
+    is_up: bool
+    response_time_ms: int | None = None
+    error_message: str | None = None
+    checked_at: datetime
+    steps: list[TeamServiceHealthcheckStepResult]
 
 
 class TeamServiceListResponse(BaseModel):

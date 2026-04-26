@@ -103,6 +103,11 @@ class RoundRunner:
                 actual_start_at = comp["actual_start_at"]
                 interval = self._get_scoring_interval(comp["scoring_interval"])
 
+                if not self._is_competition_window_open(comp):
+                    logger.debug("대회 시간 창 바깥 — 라운드 실행 대기 중: competition_id=%s", competition_id)
+                    await asyncio.sleep(5)
+                    continue
+
                 # ── 자동 공개 체크 (매 루프 1회, paused는 내부에서 건너뜀) ──
                 try:
                     released = await self._auto_release_checker.check(
@@ -383,7 +388,7 @@ class RoundRunner:
         # 2) flags 테이블에서 조회
         flag_result = await session.execute(
             text("""
-                SELECT id, team_id, is_active, expires_at
+                SELECT id, team_id, is_active, expires_at, slot_key, slot_label, point_value
                 FROM flags
                 WHERE flag_value = :flag_value
                 LIMIT 1
@@ -402,12 +407,28 @@ class RoundRunner:
         if not flag_row.is_active or (
             flag_row.expires_at and flag_row.expires_at <= datetime.now(timezone.utc)
         ):
-            await self._update_submission_verdict(session, submission_id, "expired", flag_id)
+            await self._update_submission_verdict(
+                session,
+                submission_id,
+                "expired",
+                flag_id,
+                slot_key=flag_row.slot_key,
+                slot_label=flag_row.slot_label,
+                points_awarded=flag_row.point_value,
+            )
             return "expired", flag_id
 
         # 4) 자기 팀 플래그
         if flag_row.team_id == submitter_team_id:
-            await self._update_submission_verdict(session, submission_id, "own_flag", flag_id)
+            await self._update_submission_verdict(
+                session,
+                submission_id,
+                "own_flag",
+                flag_id,
+                slot_key=flag_row.slot_key,
+                slot_label=flag_row.slot_label,
+                points_awarded=flag_row.point_value,
+            )
             return "own_flag", flag_id
 
         # 5) 중복 제출 (같은 팀이 같은 플래그를 이미 correct 으로 제출)
@@ -422,25 +443,59 @@ class RoundRunner:
             {"team_id": submitter_team_id, "flag_id": flag_id},
         )
         if (dup_result.scalar() or 0) > 0:
-            await self._update_submission_verdict(session, submission_id, "duplicate", flag_id)
+            await self._update_submission_verdict(
+                session,
+                submission_id,
+                "duplicate",
+                flag_id,
+                slot_key=flag_row.slot_key,
+                slot_label=flag_row.slot_label,
+                points_awarded=flag_row.point_value,
+            )
             return "duplicate", flag_id
 
         # 6) 정답
-        await self._update_submission_verdict(session, submission_id, "correct", flag_id)
+        await self._update_submission_verdict(
+            session,
+            submission_id,
+            "correct",
+            flag_id,
+            slot_key=flag_row.slot_key,
+            slot_label=flag_row.slot_label,
+            points_awarded=flag_row.point_value,
+        )
         return "correct", flag_id
 
     @staticmethod
     async def _update_submission_verdict(
-        session, submission_id: UUID, verdict: str, flag_id: UUID | None
+        session,
+        submission_id: UUID,
+        verdict: str,
+        flag_id: UUID | None,
+        *,
+        slot_key: str | None = None,
+        slot_label: str | None = None,
+        points_awarded: int | None = None,
     ) -> None:
         """제출 건의 verdict와 flag_id를 업데이트한다."""
         await session.execute(
             text("""
                 UPDATE flag_submissions
-                SET verdict = :verdict, flag_id = :flag_id
+                SET verdict = :verdict,
+                    flag_id = :flag_id,
+                    slot_key = COALESCE(:slot_key, slot_key),
+                    slot_label = COALESCE(:slot_label, slot_label),
+                    points_awarded = COALESCE(:points_awarded, points_awarded)
                 WHERE id = :id
             """),
-            {"verdict": verdict, "flag_id": flag_id, "id": submission_id},
+            {
+                "verdict": verdict,
+                "flag_id": flag_id,
+                "slot_key": slot_key,
+                "slot_label": slot_label,
+                "points_awarded": points_awarded,
+                "id": submission_id,
+            },
         )
 
     async def _publish_flag_captured(
@@ -579,6 +634,8 @@ class RoundRunner:
                             id,
                             status,
                             actual_start_at,
+                            scheduled_start_at,
+                            scheduled_end_at,
                             scoring_round_interval_seconds AS scoring_interval
                         FROM competitions
                         WHERE status IN ('running', 'paused')
@@ -592,6 +649,8 @@ class RoundRunner:
                     "id": row.id,
                     "status": row.status,
                     "actual_start_at": row.actual_start_at,
+                    "scheduled_start_at": row.scheduled_start_at,
+                    "scheduled_end_at": row.scheduled_end_at,
                     "scoring_interval": row.scoring_interval,
                 }
         except Exception as exc:
@@ -606,6 +665,25 @@ class RoundRunner:
         if self._interval_override is not None:
             return self._interval_override
         return db_interval
+
+    @staticmethod
+    def _coerce_utc(value: datetime | None) -> datetime | None:
+        if value is None:
+            return None
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
+
+    def _is_competition_window_open(self, comp: dict) -> bool:
+        now = datetime.now(timezone.utc)
+        scheduled_start_at = self._coerce_utc(comp.get("scheduled_start_at"))
+        scheduled_end_at = self._coerce_utc(comp.get("scheduled_end_at"))
+
+        if scheduled_start_at and now < scheduled_start_at:
+            return False
+        if scheduled_end_at and now >= scheduled_end_at:
+            return False
+        return True
 
     # ── Redis 이벤트 핸들러 ──
 

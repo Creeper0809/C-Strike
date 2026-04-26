@@ -8,6 +8,7 @@ from pydantic import BaseModel
 
 class DeployCreate(BaseModel):
     service_id: str
+    scheduled_for: datetime | None = None
 
 
 class DeployStageResponse(BaseModel):
@@ -30,6 +31,7 @@ class DeployPipelineResponse(BaseModel):
     service_name: str | None = None
     status: str
     current_stage: str | None = None
+    scheduled_for: datetime | None = None
     started_at: datetime | None = None
     completed_at: datetime | None = None
     error_detail: str | None = None
@@ -49,6 +51,7 @@ class PipelineListResponse(BaseModel):
     service_name: str | None = None
     status: str
     current_stage: str | None = None
+    scheduled_for: datetime | None = None
     started_at: datetime | None = None
     completed_at: datetime | None = None
     created_at: datetime | None = None

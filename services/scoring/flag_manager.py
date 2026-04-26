@@ -8,7 +8,10 @@ SSH 또는 HTTP PUT으로 각 팀 서비스에 플래그를 심은 뒤,
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import hmac
 import logging
+import re
 import secrets
 from datetime import datetime, timedelta, timezone
 from uuid import UUID, uuid4
@@ -29,31 +32,99 @@ logger = logging.getLogger("scoring.flag_manager")
 
 # 플래그 호스트 경로 기준 (deployer.py FLAG_BASE_DIR과 동일)
 FLAG_BASE_DIR = "/opt/cstrike-flags"
-
-
-def build_plant_ssh_command(flag_value: str, team_code: str, service_name: str) -> str:
-    """SSH로 실행할 플래그 심기 명령을 생성한다.
-
-    호스트의 /opt/cstrike-flags/{container_name}/flag.txt에 쓴다.
-    컨테이너는 이 파일을 :ro로 마운트하므로 자동 반영된다.
-    """
-    container_name = f"cstrike-{team_code}-{service_name}"
-    host_path = f"{FLAG_BASE_DIR}/{container_name}/flag.txt"
-    safe_value = flag_value.replace("'", "'\\''")
-    return f"echo '{safe_value}' > {host_path}"
-
-
-# 플래그 형식: FLAG{32자 hex}
 FLAG_PREFIX = "FLAG{"
 FLAG_SUFFIX = "}"
 
 
-def generate_flag_value() -> str:
-    """암호학적으로 안전한 플래그 값을 생성한다.
+def _safe_service_slug(name: str) -> str:
+    slug = re.sub(r"[^a-z0-9._-]+", "-", (name or "").lower()).strip("-")
+    return slug or "service"
 
-    형식: FLAG{<32자 hex>}  (128비트 엔트로피)
+
+def _safe_team_runtime_slug(team_code: str) -> str:
+    slug = re.sub(r"[^a-z0-9._-]+", "-", (team_code or "").lower()).strip("-")
+    return slug or "team"
+
+
+def _sanitize_flag_filename(value: str | None, fallback_key: str) -> str:
+    raw = (value or "").strip()
+    if not raw:
+        raw = f"flag-{fallback_key}.txt"
+    name = raw.rsplit("/", 1)[-1].replace("\\", "")
+    name = re.sub(r"[^A-Za-z0-9._-]+", "-", name).strip("-.")
+    if not name:
+        name = f"flag-{fallback_key}.txt"
+    if not name.lower().endswith(".txt"):
+        name = f"{name}.txt"
+    return name
+
+
+def _normalize_service_flag_slots(raw_slots, fallback_score: int) -> list[dict]:
+    slots = raw_slots or [
+        {
+            "slot_key": "flag-1",
+            "label": "플래그 1",
+            "filename": "flag.txt",
+            "points": fallback_score,
+        }
+    ]
+    normalized: list[dict] = []
+    for index, slot in enumerate(slots, start=1):
+        slot = slot or {}
+        slot_key = re.sub(
+            r"[^a-z0-9._-]+",
+            "-",
+            str(slot.get("slot_key") or slot.get("filename") or slot.get("label") or f"flag-{index}").strip().lower(),
+        ).strip("-") or f"flag-{index}"
+        normalized.append(
+            {
+                "slot_key": slot_key,
+                "label": str(slot.get("label") or f"플래그 {index}").strip() or f"플래그 {index}",
+                "filename": _sanitize_flag_filename(slot.get("filename"), slot_key),
+                "points": max(int(slot.get("points") or fallback_score or 100), 1),
+            }
+        )
+    return normalized
+
+
+def build_plant_ssh_command(flag_value: str, team_code: str, service_name: str, filename: str) -> str:
+    """SSH로 실행할 플래그 심기 명령을 생성한다.
+
+    호스트의 /opt/cstrike-flags/{container_name}/{filename}에 쓴다.
+    컨테이너는 이 파일을 :ro로 마운트하므로 자동 반영된다.
     """
-    return f"{FLAG_PREFIX}{secrets.token_hex(16)}{FLAG_SUFFIX}"
+    container_name = f"cstrike-{_safe_team_runtime_slug(team_code)}-{_safe_service_slug(service_name)}"
+    host_path = f"{FLAG_BASE_DIR}/{container_name}/{_sanitize_flag_filename(filename, 'flag')}"
+    safe_value = flag_value.replace("'", "'\\''")
+    return f"echo '{safe_value}' > {host_path}"
+
+
+def generate_flag_value(
+    *,
+    team_code: str,
+    service_name: str,
+    slot_key: str,
+    points: int,
+    round_number: int,
+) -> str:
+    """운영 메타데이터를 외부에 노출하지 않는 불투명 플래그 값을 생성한다."""
+    nonce = secrets.token_hex(8)
+    payload = (
+        f"v=1;"
+        f"t={team_code};"
+        f"s={_safe_service_slug(service_name)};"
+        f"k={slot_key};"
+        f"p={int(points)};"
+        f"r={int(round_number)};"
+        f"n={nonce}"
+    )
+    digest = hmac.new(
+        settings.FLAG_HMAC_SECRET.encode("utf-8"),
+        payload.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()[:32]
+    return f"{FLAG_PREFIX}{digest}{FLAG_SUFFIX}"
+
 
 
 class FlagManager:
@@ -75,13 +146,24 @@ class FlagManager:
             flag_lifetime_rounds: 플래그 유효 라운드 수
 
         Returns:
-            생성된 플래그 목록 [{team_id, service_id, flag_value, flag_id}, ...]
+            생성된 플래그 목록 [{team_id, service_id, slot_key, flag_value, flag_id}, ...]
         """
         async with async_session_factory() as session:
+            round_info_result = await session.execute(
+                text("""
+                    SELECT round_number
+                    FROM scoring_rounds
+                    WHERE id = :round_id
+                """),
+                {"round_id": round_id},
+            )
+            round_info = round_info_result.fetchone()
+            round_number = int(round_info.round_number) if round_info else 0
+
             # 1) 활성 팀 목록 조회 (status = 'active' 또는 'approved')
             teams_result = await session.execute(
                 text("""
-                    SELECT id, name FROM teams
+                    SELECT id, name, team_code FROM teams
                     WHERE competition_id = :comp_id
                       AND status IN ('active', 'approved')
                     ORDER BY name
@@ -93,7 +175,7 @@ class FlagManager:
             # 2) 활성 서비스 목록 조회
             services_result = await session.execute(
                 text("""
-                    SELECT id, name FROM vuln_services
+                    SELECT id, name, score, flag_slots FROM vuln_services
                     WHERE (competition_id = :comp_id OR competition_id IS NULL)
                       AND status = 'active'
                     ORDER BY name
@@ -116,24 +198,42 @@ class FlagManager:
             flags: list[dict] = []
             for team in teams:
                 for service in services:
-                    flag_id = uuid4()
-                    flag_value = generate_flag_value()
-                    flags.append({
-                        "id": flag_id,
-                        "round_id": round_id,
-                        "team_id": team.id,
-                        "service_id": service.id,
-                        "flag_value": flag_value,
-                        "is_active": True,
-                        "expires_at": expires_at,
-                    })
+                    flag_slots = _normalize_service_flag_slots(service.flag_slots, int(service.score or 100))
+                    for slot in flag_slots:
+                        flag_id = uuid4()
+                        flag_value = generate_flag_value(
+                            team_code=team.team_code,
+                            service_name=service.name,
+                            slot_key=slot["slot_key"],
+                            points=slot["points"],
+                            round_number=round_number,
+                        )
+                        flags.append({
+                            "id": flag_id,
+                            "round_id": round_id,
+                            "team_id": team.id,
+                            "service_id": service.id,
+                            "slot_key": slot["slot_key"],
+                            "slot_label": slot["label"],
+                            "flag_filename": slot["filename"],
+                            "point_value": slot["points"],
+                            "flag_value": flag_value,
+                            "is_active": True,
+                            "expires_at": expires_at,
+                        })
 
             # 4) 일괄 삽입
             if flags:
                 await session.execute(
                     text("""
-                        INSERT INTO flags (id, round_id, team_id, service_id, flag_value, is_active, expires_at, created_at)
-                        VALUES (:id, :round_id, :team_id, :service_id, :flag_value, :is_active, :expires_at, NOW())
+                        INSERT INTO flags (
+                            id, round_id, team_id, service_id, slot_key, slot_label,
+                            flag_filename, point_value, flag_value, is_active, expires_at, created_at
+                        )
+                        VALUES (
+                            :id, :round_id, :team_id, :service_id, :slot_key, :slot_label,
+                            :flag_filename, :point_value, :flag_value, :is_active, :expires_at, NOW()
+                        )
                     """),
                     flags,
                 )
@@ -193,8 +293,8 @@ class FlagManager:
             target = target_map.get(key)
             if target is None:
                 logger.warning(
-                    "plant 대상 없음: team_id=%s, service_id=%s",
-                    flag["team_id"], flag["service_id"],
+                    "plant 대상 없음: team_id=%s, service_id=%s, slot=%s",
+                    flag["team_id"], flag["service_id"], flag.get("slot_key"),
                 )
                 await self._mark_flag_inactive(flag["id"])
                 return False
@@ -213,8 +313,8 @@ class FlagManager:
         for i, result in enumerate(results):
             if isinstance(result, Exception):
                 logger.error(
-                    "plant 예외: flag_id=%s, error=%s",
-                    flags[i]["id"], result,
+                    "plant 예외: flag_id=%s, slot=%s, error=%s",
+                    flags[i]["id"], flags[i].get("slot_key"), result,
                 )
                 await self._mark_flag_inactive(flags[i]["id"])
                 fail_count += 1
@@ -297,6 +397,7 @@ class FlagManager:
                     await self._plant_via_ssh(
                         host_ip=target["host_ip"],
                         flag_value=flag["flag_value"],
+                        filename=flag["flag_filename"],
                         target=target,
                     )
 
@@ -307,25 +408,31 @@ class FlagManager:
             except Exception as exc:
                 last_error = str(exc)
                 logger.warning(
-                    "plant 시도 %d/%d 실패: team=%s, service=%s, error=%s",
+                    "plant 시도 %d/%d 실패: team=%s, service=%s, slot=%s, error=%s",
                     attempt, max_attempts,
-                    flag["team_id"], flag["service_id"], last_error,
+                    flag["team_id"], flag["service_id"], flag.get("slot_key"), last_error,
                 )
                 if attempt < max_attempts:
                     await asyncio.sleep(settings.FLAG_PLANT_RETRY_DELAY_SECONDS)
 
         # 최종 실패: is_active=False 처리
         logger.error(
-            "plant 최종 실패: flag_id=%s, team=%s, service=%s, last_error=%s",
-            flag["id"], flag["team_id"], flag["service_id"], last_error,
+            "plant 최종 실패: flag_id=%s, team=%s, service=%s, slot=%s, last_error=%s",
+            flag["id"], flag["team_id"], flag["service_id"], flag.get("slot_key"), last_error,
         )
         await self._mark_flag_inactive(flag["id"])
         return False
 
-    async def _plant_via_ssh(self, host_ip: str, flag_value: str, target: dict | None = None) -> None:
+    async def _plant_via_ssh(
+        self,
+        host_ip: str,
+        flag_value: str,
+        filename: str,
+        target: dict | None = None,
+    ) -> None:
         """SSH로 플래그를 호스트 파일시스템에 심는다.
 
-        호스트의 /opt/cstrike-flags/{container_name}/flag.txt 에 쓴다.
+        호스트의 /opt/cstrike-flags/{container_name}/{filename} 에 쓴다.
         컨테이너는 이 파일을 :ro로 마운트하여 자동 반영된다.
         """
         if asyncssh is None:
@@ -356,6 +463,7 @@ class FlagManager:
             flag_value=flag_value,
             team_code=target["team_code"],
             service_name=target["service_name"],
+            filename=filename,
         )
 
         async with asyncssh.connect(**connect_kwargs) as conn:

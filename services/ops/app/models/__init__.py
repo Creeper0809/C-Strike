@@ -15,6 +15,7 @@ from app.models.operator import Operator
 from app.models.scoring_round import ScoringRound
 from app.models.sla_check import SlaCheck
 from app.models.team import Team, TeamMember
+from app.models.team_mutation import TeamMutation
 from app.models.team_score import TeamScore
 from app.models.team_service import TeamService
 from app.models.ticket import Ticket, TicketMessage
@@ -37,6 +38,7 @@ __all__ = [
     "SlaCheck",
     "Team",
     "TeamMember",
+    "TeamMutation",
     "TeamScore",
     "TeamService",
     "Ticket",

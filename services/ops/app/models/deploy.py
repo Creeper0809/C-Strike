@@ -22,6 +22,7 @@ class DeployPipeline(Base):
     )
     status = Column(String(20), nullable=False, default="pending")
     current_stage = Column(String(30))
+    scheduled_for = Column(DateTime(timezone=True))
     started_at = Column(DateTime(timezone=True))
     completed_at = Column(DateTime(timezone=True))
     error_detail = Column(Text)

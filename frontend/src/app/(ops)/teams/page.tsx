@@ -1,13 +1,14 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { Fragment, useCallback, useEffect, useState } from "react";
 import {
   Loader2, Users, CheckCircle, XOctagon,
-  X, Shield, Globe, Server, Save, Trash2, Plus, Copy, Eye, EyeOff, Box,
+  X, Shield, Globe, Server, Save, Trash2, Plus, Copy, Eye, EyeOff, Box, History, RotateCcw, AlertTriangle, Download, ChevronDown, ChevronRight,
 } from "lucide-react";
 import { apiFetch } from "@/lib/api-client";
 import { cn } from "@/lib/utils";
 import TeamRuntimeSection from "./TeamRuntimeSection";
+import HealthCheckScenarioPanel from "@/components/services/HealthCheckScenarioPanel";
 import {
   TEAM_STATUS_MAP,
   TEAM_MEMBER_ROLE_MAP,
@@ -27,8 +28,13 @@ import type {
   TeamDetail,
   TeamMemberCreatePayload,
   TeamMemberCreateResponse,
+  TeamMemberRemoveResponse,
+  TeamMutationItem,
+  TeamMutationListResponse,
+  TeamMutationRetryResponse,
   TeamSshPasswordRevealResponse,
   TeamMemberItem,
+  TeamServiceHealthcheckLiveResponse,
   TeamServiceItem,
 } from "@/types/ops";
 
@@ -53,6 +59,7 @@ const TEAM_DRAWER_TABS = [
   { value: "members", label: "팀원", icon: Users },
   { value: "services", label: "서비스", icon: Server },
   { value: "runtime", label: "런타임", icon: Box },
+  { value: "history", label: "작업 이력", icon: History },
 ] as const;
 
 /* ── 유틸 ── */
@@ -68,6 +75,94 @@ function formatDate(iso: string | null): string {
   });
 }
 
+function formatMutationOperation(operationType: string): string {
+  switch (operationType) {
+    case "team.create":
+      return "팀 생성";
+    case "team.member.add":
+      return "팀원 추가";
+    case "team.member.remove":
+      return "팀원 퇴장";
+    case "team.vpn.bundle.issue":
+      return "VPN TXT 발급";
+    case "team.delete":
+      return "팀 삭제";
+    default:
+      return operationType;
+  }
+}
+
+function formatHealthCheckType(checkType: string | null): string {
+  switch (checkType) {
+    case "custom_script":
+      return "시나리오";
+    case "http_get":
+      return "HTTP GET";
+    case "tcp_connect":
+      return "TCP 연결";
+    default:
+      return checkType ?? "-";
+  }
+}
+
+function parseDownloadFilename(contentDisposition: string | null): string | null {
+  if (!contentDisposition) return null;
+
+  const utf8Match = contentDisposition.match(/filename\*=UTF-8''([^;]+)/i);
+  if (utf8Match?.[1]) {
+    try {
+      return decodeURIComponent(utf8Match[1]);
+    } catch {
+      return utf8Match[1];
+    }
+  }
+
+  const plainMatch = contentDisposition.match(/filename="([^"]+)"/i) || contentDisposition.match(/filename=([^;]+)/i);
+  return plainMatch?.[1]?.trim() || null;
+}
+
+async function parseApiErrorMessage(response: Response, fallback: string): Promise<string> {
+  try {
+    const payload = await response.json();
+    if (typeof payload?.detail === "string") {
+      return payload.detail;
+    }
+    if (Array.isArray(payload?.detail)) {
+      return payload.detail
+        .map((item: unknown) => {
+          if (typeof item === "string") return item;
+          if (
+            typeof item === "object"
+            && item !== null
+            && "msg" in item
+            && typeof (item as { msg?: unknown }).msg === "string"
+          ) {
+            return (item as { msg: string }).msg;
+          }
+          return JSON.stringify(item);
+        })
+        .join(", ");
+    }
+    if (payload?.detail) {
+      return JSON.stringify(payload.detail);
+    }
+  } catch {
+    // ignore json parse failure
+  }
+  return fallback;
+}
+
+function mutationStatusInfo(status: TeamMutationItem["status"]) {
+  switch (status) {
+    case "completed":
+      return { label: "완료", color: "ok" as const };
+    case "failed":
+      return { label: "실패", color: "danger" as const };
+    default:
+      return { label: "실행 중", color: "warning" as const };
+  }
+}
+
 function AddTeamMemberModal({
   competitionId,
   teamId,
@@ -79,7 +174,7 @@ function AddTeamMemberModal({
   teamId: string;
   teamName: string;
   onClose: () => void;
-  onAdded: () => void;
+  onAdded: () => void | Promise<void>;
 }) {
   const [members, setMembers] = useState<DiscordDirectoryMemberItem[]>([]);
   const [query, setQuery] = useState("");
@@ -89,6 +184,8 @@ function AddTeamMemberModal({
   const [isSyncing, setIsSyncing] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [result, setResult] = useState<TeamMemberCreateResponse | null>(null);
+  const [copiedField, setCopiedField] = useState<"username" | "password" | null>(null);
 
   const loadDirectory = useCallback(async () => {
     setIsLoading(true);
@@ -124,6 +221,18 @@ function AddTeamMemberModal({
   const selectedMember = members.find(
     (member) => member.discord_user_id === selectedUserId,
   ) ?? null;
+  const selectedMemberUnavailable = Boolean(
+    selectedMember && (
+      selectedMember.is_current_team_member
+      || (Boolean(selectedMember.assigned_team_id) && !selectedMember.is_current_team_member)
+    ),
+  );
+
+  useEffect(() => {
+    if (selectedMemberUnavailable) {
+      setSelectedUserId("");
+    }
+  }, [selectedMemberUnavailable]);
 
   async function handleSync() {
     setIsSyncing(true);
@@ -145,6 +254,10 @@ function AddTeamMemberModal({
       setError("추가할 디스코드 멤버를 선택하세요.");
       return;
     }
+    if (selectedMember.is_current_team_member) {
+      setError("이미 현재 팀에 속한 팀원은 다시 선택할 수 없습니다.");
+      return;
+    }
     setIsSaving(true);
     setError(null);
     try {
@@ -152,19 +265,28 @@ function AddTeamMemberModal({
         discord_user_id: selectedMember.discord_user_id,
         role: selectedRole,
       };
-      await apiFetch<TeamMemberCreateResponse>(
+      const response = await apiFetch<TeamMemberCreateResponse>(
         `/v1/competitions/${competitionId}/teams/${teamId}/members`,
         {
           method: "POST",
           body: JSON.stringify(payload),
         },
       );
-      onAdded();
-      onClose();
+      await onAdded();
+      setResult(response);
     } catch (err) {
       setError(err instanceof Error ? err.message : "팀원 추가에 실패했습니다.");
     } finally {
       setIsSaving(false);
+    }
+  }
+
+  async function handleCopy(value: string, field: "username" | "password") {
+    try {
+      await navigator.clipboard.writeText(value);
+      setCopiedField(field);
+    } catch {
+      setError("클립보드 복사에 실패했습니다.");
     }
   }
 
@@ -190,111 +312,184 @@ function AddTeamMemberModal({
           </div>
         )}
 
-        <div className="space-y-4">
-          <div className="flex items-center justify-between gap-3">
-            <input
-              type="text"
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              placeholder="이름, 사용자명, Discord ID 검색"
-              className="flex-1 px-3 py-2 text-sm bg-bg-tertiary border border-border rounded-lg text-text-primary placeholder:text-text-muted focus:outline-none focus:ring-1 focus:ring-accent"
-              autoComplete="off"
-            />
-            <button
-              type="button"
-              onClick={handleSync}
-              disabled={isSyncing || isLoading}
-              className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium rounded-lg bg-bg-tertiary text-text-secondary hover:text-text-primary disabled:opacity-50 transition-colors"
-            >
-              {isSyncing ? (
-                <Loader2 className="w-3.5 h-3.5 animate-spin" />
-              ) : (
-                <Globe className="w-3.5 h-3.5" />
-              )}
-              {isSyncing ? "동기화 중..." : "디스코드 동기화"}
-            </button>
-          </div>
-
-          <div className="max-h-72 overflow-y-auto rounded-lg border border-border">
-            {isLoading ? (
-              <div className="flex items-center justify-center py-12 text-text-muted">
-                <Loader2 className="w-4 h-4 animate-spin" />
+        {result ? (
+          <div className="space-y-4">
+            <div className="rounded-lg border border-status-ok/30 bg-status-ok/10 px-4 py-4">
+              <div className="flex items-start gap-3">
+                <CheckCircle className="mt-0.5 h-5 w-5 text-status-ok" />
+                <div>
+                  <p className="text-sm font-semibold text-text-primary">팀원 추가가 완료됐습니다.</p>
+                  <p className="mt-1 text-sm text-text-secondary">{result.message}</p>
+                  <p className="mt-1 text-xs text-text-muted">
+                    공용 프로파일 `cyber-ad-team.ovpn`과 아래 VPN 계정을 함께 전달하면 됩니다.
+                  </p>
+                </div>
               </div>
-            ) : filteredMembers.length === 0 ? (
-              <p className="px-4 py-8 text-sm text-text-muted text-center">
-                선택 가능한 디스코드 멤버가 없습니다.
-              </p>
-            ) : (
-              <div className="divide-y divide-border">
-                {filteredMembers.map((member) => {
-                  const alreadyAssignedElsewhere =
-                    Boolean(member.assigned_team_id) && !member.is_current_team_member;
-                  const selected = selectedUserId === member.discord_user_id;
-                  return (
-                    <button
-                      key={member.discord_user_id}
-                      type="button"
-                      disabled={alreadyAssignedElsewhere}
-                      onClick={() => setSelectedUserId(member.discord_user_id)}
-                      className={cn(
-                        "w-full px-4 py-3 text-left transition-colors",
-                        alreadyAssignedElsewhere
-                          ? "bg-bg-secondary/40 text-text-muted cursor-not-allowed opacity-60"
-                          : selected
-                            ? "bg-accent/10"
-                            : "hover:bg-bg-tertiary",
-                      )}
-                    >
-                      <div className="flex items-start justify-between gap-3">
-                        <div>
-                          <p className="text-sm font-medium text-text-primary">{member.display_name}</p>
-                          <p className="mt-0.5 text-xs text-text-muted font-mono">
-                            @{member.username} · {member.discord_user_id}
-                          </p>
-                        </div>
-                        <div className="text-right text-xs">
-                          {alreadyAssignedElsewhere ? (
-                            <span className="text-status-warning">
-                              {member.assigned_team_name} 팀 소속
-                            </span>
-                          ) : member.is_current_team_member ? (
-                            <span className="text-accent">이미 현재 팀 소속</span>
-                          ) : null}
-                        </div>
-                      </div>
-                    </button>
-                  );
-                })}
-              </div>
-            )}
-          </div>
+            </div>
 
-          <div className="grid gap-3 sm:grid-cols-2">
-            <div className="rounded-lg bg-bg-tertiary/50 border border-border p-3">
-              <span className="text-xs text-text-muted">선택된 멤버</span>
-              <p className="mt-1 text-sm text-text-primary">
-                {selectedMember ? selectedMember.display_name : "아직 선택되지 않았습니다."}
-              </p>
-              {selectedMember && (
-                <p className="mt-0.5 text-xs text-text-muted font-mono">
-                  @{selectedMember.username} · {selectedMember.discord_user_id}
+            <div className="grid gap-3 sm:grid-cols-2">
+              <div className="rounded-lg border border-border bg-bg-tertiary/50 p-3">
+                <span className="text-xs text-text-muted">추가된 팀원</span>
+                <p className="mt-1 text-sm text-text-primary">{result.discord_username || result.discord_user_id}</p>
+                <p className="mt-0.5 text-xs text-text-muted font-mono">{result.discord_user_id}</p>
+              </div>
+              <div className="rounded-lg border border-border bg-bg-tertiary/50 p-3">
+                <span className="text-xs text-text-muted">VPN IP</span>
+                <p className="mt-1 text-sm text-text-primary font-mono">{result.vpn_ip || "-"}</p>
+              </div>
+            </div>
+
+            <div className="rounded-lg border border-border bg-bg-tertiary/50 p-4 space-y-3">
+              <div className="flex items-center justify-between gap-3">
+                <div>
+                  <span className="text-xs text-text-muted">VPN 아이디</span>
+                  <p className="mt-1 text-sm font-mono text-text-primary">{result.vpn_username || "-"}</p>
+                </div>
+                {result.vpn_username && (
+                  <button
+                    type="button"
+                    onClick={() => handleCopy(result.vpn_username!, "username")}
+                    className="inline-flex items-center gap-1.5 rounded-lg bg-bg-primary px-3 py-2 text-xs text-text-secondary hover:text-text-primary transition-colors"
+                  >
+                    <Copy className="h-3.5 w-3.5" />
+                    {copiedField === "username" ? "복사됨" : "복사"}
+                  </button>
+                )}
+              </div>
+
+              <div className="flex items-center justify-between gap-3">
+                <div>
+                  <span className="text-xs text-text-muted">초기 VPN 비밀번호</span>
+                  <p className="mt-1 text-sm font-mono text-text-primary break-all">
+                    {result.generated_vpn_password || "기존 계정을 재사용합니다. 필요하면 비밀번호를 별도 재발급하세요."}
+                  </p>
+                </div>
+                {result.generated_vpn_password && (
+                  <button
+                    type="button"
+                    onClick={() => handleCopy(result.generated_vpn_password!, "password")}
+                    className="inline-flex items-center gap-1.5 rounded-lg bg-bg-primary px-3 py-2 text-xs text-text-secondary hover:text-text-primary transition-colors"
+                  >
+                    <Copy className="h-3.5 w-3.5" />
+                    {copiedField === "password" ? "복사됨" : "복사"}
+                  </button>
+                )}
+              </div>
+            </div>
+          </div>
+        ) : (
+          <div className="space-y-4">
+            <div className="flex items-center justify-between gap-3">
+              <input
+                type="text"
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                placeholder="이름, 사용자명, Discord ID 검색"
+                className="flex-1 px-3 py-2 text-sm bg-bg-tertiary border border-border rounded-lg text-text-primary placeholder:text-text-muted focus:outline-none focus:ring-1 focus:ring-accent"
+                autoComplete="off"
+              />
+              <button
+                type="button"
+                onClick={handleSync}
+                disabled={isSyncing || isLoading}
+                className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium rounded-lg bg-bg-tertiary text-text-secondary hover:text-text-primary disabled:opacity-50 transition-colors"
+              >
+                {isSyncing ? (
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                ) : (
+                  <Globe className="w-3.5 h-3.5" />
+                )}
+                {isSyncing ? "동기화 중..." : "디스코드 동기화"}
+              </button>
+            </div>
+
+            <div className="max-h-72 overflow-y-auto rounded-lg border border-border">
+              {isLoading ? (
+                <div className="flex items-center justify-center py-12 text-text-muted">
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                </div>
+              ) : filteredMembers.length === 0 ? (
+                <p className="px-4 py-8 text-sm text-text-muted text-center">
+                  선택 가능한 디스코드 멤버가 없습니다.
                 </p>
+              ) : (
+                <div className="divide-y divide-border">
+                  {filteredMembers.map((member) => {
+                    const alreadyAssignedElsewhere =
+                      Boolean(member.assigned_team_id) && !member.is_current_team_member;
+                    const alreadyInCurrentTeam = member.is_current_team_member;
+                    const disabled = alreadyAssignedElsewhere || alreadyInCurrentTeam;
+                    const selected = selectedUserId === member.discord_user_id;
+                    return (
+                      <button
+                        key={member.discord_user_id}
+                        type="button"
+                        disabled={disabled}
+                        onClick={() => {
+                          if (!disabled) {
+                            setSelectedUserId(member.discord_user_id);
+                          }
+                        }}
+                        className={cn(
+                          "w-full px-4 py-3 text-left transition-colors",
+                          disabled
+                            ? "bg-bg-secondary/40 text-text-muted cursor-not-allowed opacity-60"
+                            : selected
+                              ? "bg-accent/10"
+                              : "hover:bg-bg-tertiary",
+                        )}
+                      >
+                        <div className="flex items-start justify-between gap-3">
+                          <div>
+                            <p className="text-sm font-medium text-text-primary">{member.display_name}</p>
+                            <p className="mt-0.5 text-xs text-text-muted font-mono">
+                              @{member.username} · {member.discord_user_id}
+                            </p>
+                          </div>
+                          <div className="text-right text-xs">
+                            {alreadyAssignedElsewhere ? (
+                              <span className="text-status-warning">
+                                {member.assigned_team_name} 팀 소속
+                              </span>
+                            ) : alreadyInCurrentTeam ? (
+                              <span className="text-accent">이미 현재 팀 소속</span>
+                            ) : null}
+                          </div>
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
               )}
             </div>
 
-            <label className="block">
-              <span className="text-xs text-text-muted">팀 내 역할</span>
-              <select
-                value={selectedRole}
-                onChange={(e) => setSelectedRole(e.target.value as "captain" | "member")}
-                className="mt-1 block w-full px-3 py-2 text-sm bg-bg-tertiary border border-border rounded-lg text-text-primary focus:outline-none focus:ring-1 focus:ring-accent"
-              >
-                <option value="member">일반 팀원</option>
-                <option value="captain">팀장</option>
-              </select>
-            </label>
+            <div className="grid gap-3 sm:grid-cols-2">
+              <div className="rounded-lg bg-bg-tertiary/50 border border-border p-3">
+                <span className="text-xs text-text-muted">선택된 멤버</span>
+                <p className="mt-1 text-sm text-text-primary">
+                  {selectedMember ? selectedMember.display_name : "아직 선택되지 않았습니다."}
+                </p>
+                {selectedMember && (
+                  <p className="mt-0.5 text-xs text-text-muted font-mono">
+                    @{selectedMember.username} · {selectedMember.discord_user_id}
+                  </p>
+                )}
+              </div>
+
+              <label className="block">
+                <span className="text-xs text-text-muted">팀 내 역할</span>
+                <select
+                  value={selectedRole}
+                  onChange={(e) => setSelectedRole(e.target.value as "captain" | "member")}
+                  className="mt-1 block w-full px-3 py-2 text-sm bg-bg-tertiary border border-border rounded-lg text-text-primary focus:outline-none focus:ring-1 focus:ring-accent"
+                >
+                  <option value="member">일반 팀원</option>
+                  <option value="captain">팀장</option>
+                </select>
+              </label>
+            </div>
           </div>
-        </div>
+        )}
 
         <div className="flex justify-end gap-2 mt-6">
           <button
@@ -306,16 +501,22 @@ function AddTeamMemberModal({
           </button>
           <button
             type="button"
-            onClick={handleSubmit}
-            disabled={isSaving || !selectedMember}
+            onClick={result ? onClose : handleSubmit}
+            disabled={result ? false : isSaving || !selectedMember || selectedMember.is_current_team_member}
             className="inline-flex items-center gap-1.5 px-4 py-2 text-sm font-medium rounded-lg bg-accent text-white hover:bg-accent/90 disabled:opacity-50 transition-colors"
           >
-            {isSaving ? (
+            {result ? (
+              <CheckCircle className="w-4 h-4" />
+            ) : isSaving ? (
               <Loader2 className="w-4 h-4 animate-spin" />
             ) : (
               <Plus className="w-4 h-4" />
             )}
-            {isSaving ? "추가 중..." : selectedMember?.is_current_team_member ? "팀 정보 갱신" : "팀원 추가"}
+            {result
+              ? "확인"
+              : isSaving
+                ? "추가 중..."
+                : "팀원 추가"}
           </button>
         </div>
       </div>
@@ -340,9 +541,14 @@ function TeamDrawer({
   const [detail, setDetail] = useState<TeamDetail | null>(null);
   const [members, setMembers] = useState<TeamMemberItem[]>([]);
   const [services, setServices] = useState<TeamServiceItem[]>([]);
+  const [mutations, setMutations] = useState<TeamMutationItem[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<TeamDrawerTab>("overview");
+  const [expandedServiceId, setExpandedServiceId] = useState<string | null>(null);
+  const [serviceHealthcheckById, setServiceHealthcheckById] = useState<Record<string, TeamServiceHealthcheckLiveResponse | null>>({});
+  const [serviceHealthcheckErrorById, setServiceHealthcheckErrorById] = useState<Record<string, string>>({});
+  const [serviceHealthcheckLoadingId, setServiceHealthcheckLoadingId] = useState<string | null>(null);
 
   /* 승인 / 실격 / 삭제 모달 */
   const [showApprove, setShowApprove] = useState(false);
@@ -363,23 +569,30 @@ function TeamDrawer({
   const [passwordCopied, setPasswordCopied] = useState(false);
 
   const [showAddMember, setShowAddMember] = useState(false);
+  const [memberToRemove, setMemberToRemove] = useState<TeamMemberItem | null>(null);
+  const [isRemovingMember, setIsRemovingMember] = useState(false);
+  const [showDownloadVpnTxtConfirm, setShowDownloadVpnTxtConfirm] = useState(false);
+  const [isDownloadingVpnTxt, setIsDownloadingVpnTxt] = useState(false);
+  const [retryingMutationId, setRetryingMutationId] = useState<string | null>(null);
 
   const fetchAll = useCallback(async () => {
     setIsLoading(true);
     setError(null);
     try {
-      const [d, mRaw, sRaw] = await Promise.all([
+      const [d, mRaw, sRaw, mutationResp] = await Promise.all([
         apiFetch<TeamDetail>(`/v1/competitions/${competitionId}/teams/${teamId}`),
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         apiFetch<any>(`/v1/competitions/${competitionId}/teams/${teamId}/members`),
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         apiFetch<any>(`/v1/competitions/${competitionId}/teams/${teamId}/services`),
+        apiFetch<TeamMutationListResponse>(`/v1/competitions/${competitionId}/teams/${teamId}/mutations?limit=20`),
       ]);
       setDetail(d);
       setRevealedSshPassword(null);
       setPasswordCopied(false);
       setMembers(Array.isArray(mRaw) ? mRaw : (mRaw.items ?? []));
       setServices(Array.isArray(sRaw) ? sRaw : (sRaw.items ?? []));
+      setMutations(mutationResp.items ?? []);
     } catch (err) {
       setError(err instanceof Error ? err.message : "팀 정보 조회에 실패했습니다.");
     } finally {
@@ -392,7 +605,38 @@ function TeamDrawer({
     setActiveTab("overview");
     setIsEditing(false);
     setShowAddMember(false);
+    setExpandedServiceId(null);
+    setServiceHealthcheckById({});
+    setServiceHealthcheckErrorById({});
+    setServiceHealthcheckLoadingId(null);
   }, [teamId]);
+
+  const fetchServiceHealthcheck = useCallback(async (serviceRowId: string) => {
+    setServiceHealthcheckLoadingId(serviceRowId);
+    setServiceHealthcheckErrorById((current) => ({ ...current, [serviceRowId]: "" }));
+    try {
+      const result = await apiFetch<TeamServiceHealthcheckLiveResponse>(
+        `/v1/competitions/${competitionId}/teams/${teamId}/services/${serviceRowId}/healthcheck`,
+      );
+      setServiceHealthcheckById((current) => ({ ...current, [serviceRowId]: result }));
+    } catch (err) {
+      setServiceHealthcheckErrorById((current) => ({
+        ...current,
+        [serviceRowId]: err instanceof Error ? err.message : "실시간 헬스체크 조회에 실패했습니다.",
+      }));
+    } finally {
+      setServiceHealthcheckLoadingId((current) => (current === serviceRowId ? null : current));
+    }
+  }, [competitionId, teamId]);
+
+  const handleToggleService = useCallback((serviceRowId: string) => {
+    if (expandedServiceId === serviceRowId) {
+      setExpandedServiceId(null);
+      return;
+    }
+    setExpandedServiceId(serviceRowId);
+    void fetchServiceHealthcheck(serviceRowId);
+  }, [expandedServiceId, fetchServiceHealthcheck]);
 
   function startEditing() {
     if (!detail) return;
@@ -516,6 +760,84 @@ function TeamDrawer({
     }
   }
 
+  async function handleRemoveMember() {
+    if (!memberToRemove) return;
+    setIsRemovingMember(true);
+    setError(null);
+    try {
+      await apiFetch<TeamMemberRemoveResponse>(
+        `/v1/competitions/${competitionId}/teams/${teamId}/members/${memberToRemove.id}`,
+        { method: "DELETE" },
+      );
+      setMemberToRemove(null);
+      await fetchAll();
+      onMutated();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "팀원 퇴장 처리에 실패했습니다.");
+    } finally {
+      setIsRemovingMember(false);
+    }
+  }
+
+  async function handleDownloadVpnTxt() {
+    setIsDownloadingVpnTxt(true);
+    setError(null);
+    try {
+      const response = await fetch(
+        `/api/v1/competitions/${competitionId}/teams/${teamId}/members/vpn-txt`,
+        {
+          method: "POST",
+          credentials: "include",
+        },
+      );
+      if (!response.ok) {
+        throw new Error(await parseApiErrorMessage(response, "팀 VPN TXT 발급에 실패했습니다."));
+      }
+
+      const blob = await response.blob();
+      const filename =
+        parseDownloadFilename(response.headers.get("Content-Disposition"))
+        || `${detail?.team_code || "team"}-vpn-access.txt`;
+      const downloadUrl = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = downloadUrl;
+      anchor.download = filename;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      URL.revokeObjectURL(downloadUrl);
+      setShowDownloadVpnTxtConfirm(false);
+      await fetchAll();
+      onMutated();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "팀 VPN TXT 발급에 실패했습니다.");
+    } finally {
+      setIsDownloadingVpnTxt(false);
+    }
+  }
+
+  async function handleRetryMutation(mutation: TeamMutationItem) {
+    setRetryingMutationId(mutation.id);
+    setError(null);
+    try {
+      const response = await apiFetch<TeamMutationRetryResponse>(
+        `/v1/competitions/${competitionId}/teams/${teamId}/mutations/${mutation.id}/retry`,
+        { method: "POST" },
+      );
+      if (response.team_deleted) {
+        onMutated();
+        onClose();
+        return;
+      }
+      await fetchAll();
+      onMutated();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "작업 재시도에 실패했습니다.");
+    } finally {
+      setRetryingMutationId(null);
+    }
+  }
+
   const statusInfo = detail ? (TEAM_STATUS_MAP[detail.status] || { label: detail.status, color: "neutral" as const }) : null;
   const inputClass = "w-full bg-bg-tertiary border border-border rounded-lg px-3 py-2 text-sm text-text-primary focus:outline-none focus:ring-1 focus:ring-accent";
 
@@ -589,6 +911,8 @@ function TeamDrawer({
                           ? `${members.length}`
                           : tab.value === "services"
                             ? `${services.length}`
+                            : tab.value === "history"
+                              ? `${mutations.length}`
                             : null;
 
                       return (
@@ -763,14 +1087,25 @@ function TeamDrawer({
                           팀원 초대와 현재 소속 상태를 관리합니다.
                         </p>
                       </div>
-                      <button
-                        type="button"
-                        onClick={() => setShowAddMember(true)}
-                        className="inline-flex items-center gap-1.5 rounded-lg bg-bg-tertiary px-3 py-1.5 text-xs text-text-secondary hover:text-text-primary transition-colors"
-                      >
-                        <Plus className="w-3.5 h-3.5" />
-                        팀원 추가
-                      </button>
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() => setShowDownloadVpnTxtConfirm(true)}
+                          disabled={!members.some((member) => member.status === "pending" || member.status === "approved")}
+                          className="inline-flex items-center gap-1.5 rounded-lg bg-bg-tertiary px-3 py-1.5 text-xs text-text-secondary hover:text-text-primary transition-colors disabled:opacity-50"
+                        >
+                          <Download className="w-3.5 h-3.5" />
+                          VPN TXT
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setShowAddMember(true)}
+                          className="inline-flex items-center gap-1.5 rounded-lg bg-bg-tertiary px-3 py-1.5 text-xs text-text-secondary hover:text-text-primary transition-colors"
+                        >
+                          <Plus className="w-3.5 h-3.5" />
+                          팀원 추가
+                        </button>
+                      </div>
                     </div>
 	                {members.length > 0 ? (
 	                  <table className="w-full text-sm">
@@ -780,11 +1115,13 @@ function TeamDrawer({
 	                        <th className="px-5 py-2.5 font-medium">역할</th>
 	                        <th className="px-5 py-2.5 font-medium">상태</th>
                         <th className="px-5 py-2.5 font-medium">가입일</th>
+                        <th className="px-5 py-2.5 font-medium text-right">액션</th>
                       </tr>
                     </thead>
                     <tbody>
                       {members.map((m) => {
                         const mStatus = TEAM_MEMBER_STATUS_MAP[m.status] || { label: m.status, color: "neutral" as const };
+                        const canRemove = m.status === "pending" || m.status === "approved";
                         return (
                           <tr key={m.id} className="border-t border-border last:border-b-0">
                             <td className="px-5 py-2.5 text-text-primary">
@@ -793,6 +1130,20 @@ function TeamDrawer({
                             <td className="px-5 py-2.5 text-text-secondary">{TEAM_MEMBER_ROLE_MAP[m.role] || m.role}</td>
                             <td className="px-5 py-2.5"><StatusIndicator status={mStatus.color} label={mStatus.label} size="sm" /></td>
                             <td className="px-5 py-2.5 text-text-secondary">{formatDate(m.joined_at)}</td>
+                            <td className="px-5 py-2.5 text-right">
+                              {canRemove ? (
+                                <button
+                                  type="button"
+                                  onClick={() => setMemberToRemove(m)}
+                                  className="inline-flex items-center gap-1 rounded-lg border border-status-danger/30 px-2.5 py-1.5 text-xs text-status-danger hover:bg-status-danger/10 transition-colors"
+                                >
+                                  <Trash2 className="w-3.5 h-3.5" />
+                                  퇴장
+                                </button>
+                              ) : (
+                                <span className="text-xs text-text-muted">-</span>
+                              )}
+                            </td>
                           </tr>
                         );
                       })}
@@ -825,28 +1176,114 @@ function TeamDrawer({
                       </tr>
                     </thead>
                     <tbody>
-                      {services.map((svc) => (
-                        <tr key={svc.id} className="border-t border-border last:border-b-0">
-                          <td className="px-5 py-2.5 text-text-primary">{svc.service_name || svc.service_id}</td>
-                          <td className="px-5 py-2.5 text-text-secondary font-mono text-xs">{svc.host_ip}:{svc.port}</td>
-                          <td className="px-5 py-2.5">
-                            <StatusIndicator
-                              status={svc.status === "running" ? "ok" : svc.status === "stopped" ? "neutral" : "warning"}
-                              label={svc.status}
-                              size="sm"
-                            />
-                          </td>
-                          <td className="px-5 py-2.5 text-text-secondary">
-                            {svc.last_health_check_at ? (
-                              <span className={cn("text-xs", svc.last_health_check_result ? "text-status-ok" : "text-status-danger")}>
-                                {svc.last_health_check_result ? "정상" : "실패"} ({formatDate(svc.last_health_check_at)})
-                              </span>
-                            ) : (
-                              <span className="text-xs text-text-muted">-</span>
+                      {services.map((svc) => {
+                        const isExpanded = expandedServiceId === svc.id;
+                        const liveHealth = serviceHealthcheckById[svc.id];
+                        const liveHealthFetchError = serviceHealthcheckErrorById[svc.id] || null;
+                        const effectiveHealthAt = liveHealth?.checked_at ?? svc.last_health_check_at;
+                        const effectiveHealthResult = liveHealth?.is_up ?? svc.last_health_check_result;
+                        const effectiveHealthType = liveHealth?.check_type ?? svc.last_health_check_type;
+                        const effectiveHealthResponseTimeMs = liveHealth?.response_time_ms ?? svc.last_health_check_response_time_ms;
+                        const effectiveHealthError = liveHealthFetchError || liveHealth?.error_message || svc.last_health_check_error;
+                        const healthLabel = !effectiveHealthAt
+                          ? "미실행"
+                          : effectiveHealthResult
+                            ? "정상"
+                            : "실패";
+                        const healthColor: "neutral" | "ok" | "danger" = !effectiveHealthAt
+                          ? "neutral"
+                          : effectiveHealthResult
+                            ? "ok"
+                            : "danger";
+
+                        return (
+                          <Fragment key={svc.id}>
+                            <tr className="border-t border-border last:border-b-0">
+                              <td className="px-5 py-2.5 text-text-primary">
+                                <button
+                                  type="button"
+                                  onClick={() => handleToggleService(svc.id)}
+                                  className="inline-flex items-center gap-2 text-left hover:text-accent transition-colors"
+                                >
+                                  {isExpanded ? <ChevronDown className="w-4 h-4 text-text-muted" /> : <ChevronRight className="w-4 h-4 text-text-muted" />}
+                                  <span>{svc.service_name || svc.service_id}</span>
+                                </button>
+                              </td>
+                              <td className="px-5 py-2.5 text-text-secondary font-mono text-xs">{svc.host_ip}:{svc.port}</td>
+                              <td className="px-5 py-2.5">
+                                <StatusIndicator
+                                  status={svc.status === "running" ? "ok" : svc.status === "stopped" ? "neutral" : "warning"}
+                                  label={svc.status}
+                                  size="sm"
+                                />
+                              </td>
+                              <td className="px-5 py-2.5 text-text-secondary">
+                                <div className="flex flex-col gap-1">
+                                  <StatusIndicator status={healthColor} label={healthLabel} size="sm" />
+                                  {effectiveHealthAt ? (
+                                    <span className="text-[11px] text-text-muted">{formatDate(effectiveHealthAt)}</span>
+                                  ) : (
+                                    <span className="text-[11px] text-text-muted">최근 실행 기록 없음</span>
+                                  )}
+                                </div>
+                              </td>
+                            </tr>
+                            {isExpanded && (
+                              <tr className="border-t border-border/60 bg-bg-tertiary/20">
+                                <td colSpan={4} className="px-5 py-4">
+                                  <div className="space-y-4">
+                                    <div className="grid gap-3 md:grid-cols-4">
+                                      <div className="rounded-lg border border-border/60 bg-bg-secondary px-4 py-3">
+                                        <p className="text-[11px] uppercase tracking-wider text-text-muted">최근 상태</p>
+                                        <p className="mt-1 text-sm font-medium text-text-primary">{healthLabel}</p>
+                                      </div>
+                                      <div className="rounded-lg border border-border/60 bg-bg-secondary px-4 py-3">
+                                        <p className="text-[11px] uppercase tracking-wider text-text-muted">체크 방식</p>
+                                        <p className="mt-1 text-sm font-medium text-text-primary">{formatHealthCheckType(effectiveHealthType)}</p>
+                                      </div>
+                                      <div className="rounded-lg border border-border/60 bg-bg-secondary px-4 py-3">
+                                        <p className="text-[11px] uppercase tracking-wider text-text-muted">응답 시간</p>
+                                        <p className="mt-1 text-sm font-medium text-text-primary">
+                                          {typeof effectiveHealthResponseTimeMs === "number"
+                                            ? `${effectiveHealthResponseTimeMs} ms`
+                                            : "-"}
+                                        </p>
+                                      </div>
+                                      <div className="rounded-lg border border-border/60 bg-bg-secondary px-4 py-3">
+                                        <p className="text-[11px] uppercase tracking-wider text-text-muted">최근 확인</p>
+                                        <p className="mt-1 text-sm font-medium text-text-primary">{formatDate(effectiveHealthAt)}</p>
+                                      </div>
+                                    </div>
+
+                                    {serviceHealthcheckLoadingId === svc.id && (
+                                      <div className="rounded-lg border border-border/60 bg-bg-secondary px-4 py-3 text-sm text-text-secondary">
+                                        실시간 헬스체크를 다시 확인하는 중입니다...
+                                      </div>
+                                    )}
+
+                                    {effectiveHealthError && (
+                                      <div className="rounded-lg border border-status-danger/30 bg-status-danger/5 px-4 py-3">
+                                        <p className="text-xs font-semibold text-status-danger">최근 헬스체크 오류</p>
+                                        <pre className="mt-2 whitespace-pre-wrap break-words text-xs text-status-danger/90">
+                                          {effectiveHealthError}
+                                        </pre>
+                                      </div>
+                                    )}
+
+                                    <HealthCheckScenarioPanel
+                                      endpoint={svc.health_check_endpoint}
+                                      scenarios={svc.healthcheck_scenarios}
+                                      stepResults={liveHealth?.steps ?? null}
+                                      loading={serviceHealthcheckLoadingId === svc.id}
+                                      errorMessage={liveHealthFetchError}
+                                    />
+                                  </div>
+                                </td>
+                              </tr>
                             )}
-                          </td>
-                        </tr>
-                      ))}
+                          </Fragment>
+                        );
+                      })}
 	                    </tbody>
 	                  </table>
 	                ) : (
@@ -862,6 +1299,84 @@ function TeamDrawer({
                     services={services}
                     embedded
                   />
+                )}
+
+                {activeTab === "history" && (
+                  <section className="bg-bg-secondary rounded-xl border border-border overflow-hidden">
+                    <div className="px-5 py-4 border-b border-border">
+                      <h3 className="text-sm font-semibold text-text-primary flex items-center gap-2">
+                        <History className="w-4 h-4 text-text-muted" /> 작업 이력
+                      </h3>
+                      <p className="mt-1 text-xs text-text-muted">
+                        팀 생성, 팀원 추가/퇴장, 팀 삭제 작업 결과를 확인하고 실패한 작업을 재시도할 수 있습니다.
+                      </p>
+                    </div>
+                    {mutations.length > 0 ? (
+                      <div className="divide-y divide-border">
+                        {mutations.map((mutation) => {
+                          const status = mutationStatusInfo(mutation.status);
+                          const warnings = Array.isArray(mutation.result?.warnings)
+                            ? mutation.result.warnings.filter((item): item is string => typeof item === "string")
+                            : [];
+                          return (
+                            <div key={mutation.id} className="px-5 py-4 space-y-3">
+                              <div className="flex items-start justify-between gap-3">
+                                <div className="min-w-0">
+                                  <div className="flex flex-wrap items-center gap-2">
+                                    <StatusIndicator status={status.color} label={status.label} size="sm" />
+                                    <span className="text-sm font-medium text-text-primary">
+                                      {formatMutationOperation(mutation.operation_type)}
+                                    </span>
+                                  </div>
+                                  <p className="mt-1 text-xs text-text-muted">
+                                    실행자 {mutation.requested_by_name} · 시작 {formatDate(mutation.started_at)}
+                                    {mutation.completed_at ? ` · 종료 ${formatDate(mutation.completed_at)}` : ""}
+                                  </p>
+                                </div>
+                                {mutation.retryable && (
+                                  <button
+                                    type="button"
+                                    onClick={() => handleRetryMutation(mutation)}
+                                    disabled={retryingMutationId === mutation.id}
+                                    className="inline-flex items-center gap-1.5 rounded-lg border border-border px-2.5 py-1.5 text-xs text-text-secondary hover:text-text-primary hover:bg-bg-tertiary transition-colors disabled:opacity-50"
+                                  >
+                                    {retryingMutationId === mutation.id ? (
+                                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                                    ) : (
+                                      <RotateCcw className="w-3.5 h-3.5" />
+                                    )}
+                                    {retryingMutationId === mutation.id ? "재시도 중..." : "재시도"}
+                                  </button>
+                                )}
+                              </div>
+
+                              {mutation.error_detail && (
+                                <div className="rounded-lg border border-status-danger/30 bg-status-danger/10 px-3 py-2 text-xs text-status-danger whitespace-pre-wrap break-words">
+                                  {mutation.error_detail}
+                                </div>
+                              )}
+
+                              {warnings.length > 0 && (
+                                <div className="rounded-lg border border-status-warning/30 bg-status-warning/10 px-3 py-2 text-xs text-status-warning">
+                                  <div className="flex items-center gap-1.5 font-medium">
+                                    <AlertTriangle className="w-3.5 h-3.5" />
+                                    경고
+                                  </div>
+                                  <ul className="mt-1 space-y-1 list-disc pl-4">
+                                    {warnings.map((warning) => (
+                                      <li key={warning}>{warning}</li>
+                                    ))}
+                                  </ul>
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    ) : (
+                      <p className="px-5 py-8 text-sm text-text-muted">기록된 작업 이력이 없습니다.</p>
+                    )}
+                  </section>
                 )}
 	            </>
 	          )}
@@ -911,8 +1426,8 @@ function TeamDrawer({
         title="팀을 영구 삭제하시겠습니까?"
 	        description={
 	          detail?.status === "active"
-	            ? `"${detail?.name}" 팀은 현재 활성 상태입니다. 삭제하면 팀원·점수·플래그·SLA 기록이 모두 함께 사라지며 되돌릴 수 없습니다. 배포된 컨테이너는 삭제 전에 [런타임] 섹션에서 상태를 확인하세요.`
-	            : `"${detail?.name}" 팀과 관련된 모든 레코드(팀원, 점수, 플래그, SLA, 팀 서비스 매핑)가 함께 삭제됩니다. 이 작업은 되돌릴 수 없습니다.`
+	            ? `"${detail?.name}" 팀은 현재 활성 상태입니다. 삭제하면 팀원·점수·플래그·SLA 기록이 모두 함께 사라지며 되돌릴 수 없고, 팀 서버 컨테이너와 VPN/방화벽 등 네트워크 설정도 함께 정리됩니다.`
+	            : `"${detail?.name}" 팀과 관련된 모든 레코드(팀원, 점수, 플래그, SLA, 팀 서비스 매핑)가 함께 삭제되며, 팀 서버 컨테이너와 VPN/방화벽 등 네트워크 설정도 같이 정리됩니다. 이 작업은 되돌릴 수 없습니다.`
 	        }
         confirmLabel="영구 삭제"
         variant="danger"
@@ -932,6 +1447,40 @@ function TeamDrawer({
           }}
         />
       )}
+
+      <ConfirmModal
+        open={Boolean(memberToRemove)}
+        onOpenChange={(open) => {
+          if (!open) {
+            setMemberToRemove(null);
+          }
+        }}
+        title="팀원을 퇴장 처리하시겠습니까?"
+        description={
+          memberToRemove
+            ? `"${memberToRemove.discord_username || memberToRemove.discord_user_id}" 사용자를 팀에서 제외합니다. Discord 팀 역할과 해당 팀원의 VPN 계정도 함께 비활성화됩니다.${memberToRemove.role === "captain" ? " 현재 팀장이므로 팀장 정보는 비워집니다." : ""}`
+            : undefined
+        }
+        confirmLabel="퇴장 처리"
+        variant="danger"
+        onConfirm={handleRemoveMember}
+        isLoading={isRemovingMember}
+      />
+
+      <ConfirmModal
+        open={showDownloadVpnTxtConfirm}
+        onOpenChange={setShowDownloadVpnTxtConfirm}
+        title="팀원 VPN 접속 정보를 TXT로 받으시겠습니까?"
+        description="활성 팀원 전체의 VPN 아이디, 비밀번호, VPN IP를 TXT 파일로 내려받습니다."
+        confirmLabel="TXT 다운로드"
+        variant="default"
+        onConfirm={handleDownloadVpnTxt}
+        isLoading={isDownloadingVpnTxt}
+      >
+        <div className="rounded-lg border border-status-warning/30 bg-status-warning/10 px-3 py-2 text-xs text-status-warning">
+          저장된 VPN 비밀번호가 없는 팀원이 있으면 이번 발급 과정에서 해당 팀원의 VPN 비밀번호가 재발급될 수 있습니다.
+        </div>
+      </ConfirmModal>
     </>
   );
 }

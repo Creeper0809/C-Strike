@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -109,7 +110,6 @@ async def _handle_pipeline_done(data: dict):
 
 async def _handle_build_done(data: dict):
     from app.models.vuln_service import VulnService
-    from datetime import datetime, timezone
 
     # builder.py가 발행하는 키는 "status" ("success" | "failed").
     # ops 내부 컬럼명은 VulnService.build_status — 두 이름 혼동 금지.
@@ -145,6 +145,65 @@ async def _handle_build_done(data: dict):
         await db.commit()
 
 
+async def _scheduled_deploy_runner():
+    """예약된 배포 파이프라인을 주기적으로 실행한다."""
+    from fastapi import HTTPException
+
+    from app.api.deploy import (
+        _dispatch_deployment,
+        _get_approved_teams_or_raise,
+        activate_scheduled_pipeline,
+    )
+    from app.models.deploy import DeployPipeline
+    from app.models.vuln_service import VulnService
+
+    while True:
+        await asyncio.sleep(5)
+        try:
+            async with async_session() as db:
+                now = datetime.now(timezone.utc)
+                result = await db.execute(
+                    select(DeployPipeline)
+                    .where(
+                        DeployPipeline.status == "scheduled",
+                        DeployPipeline.scheduled_for.is_not(None),
+                        DeployPipeline.scheduled_for <= now,
+                    )
+                    .order_by(DeployPipeline.scheduled_for.asc(), DeployPipeline.created_at.asc())
+                )
+                pipelines = list(result.scalars().all())
+
+                for pipeline in pipelines:
+                    service = await db.get(VulnService, pipeline.service_id)
+                    if service is None:
+                        pipeline.status = "failed"
+                        pipeline.error_detail = "예약 배포 실행 실패: 원본 서비스가 존재하지 않습니다."
+                        pipeline.completed_at = datetime.now(timezone.utc)
+                        await db.commit()
+                        continue
+                    if service.status != "active":
+                        pipeline.status = "failed"
+                        pipeline.error_detail = f"예약 배포 실행 실패: 서비스 상태가 active가 아닙니다. (현재: {service.status})"
+                        pipeline.completed_at = datetime.now(timezone.utc)
+                        await db.commit()
+                        continue
+
+                    try:
+                        teams = await _get_approved_teams_or_raise(db, service)
+                    except HTTPException as exc:
+                        pipeline.status = "failed"
+                        pipeline.error_detail = f"예약 배포 실행 실패: {exc.detail}"
+                        pipeline.completed_at = datetime.now(timezone.utc)
+                        await db.commit()
+                        continue
+
+                    await activate_scheduled_pipeline(db, pipeline)
+                    await db.commit()
+                    await _dispatch_deployment(db, pipeline, service, teams)
+        except Exception as e:
+            print(f"[Scheduled Deploy Runner] error: {e}")
+
+
 # ── 라이프사이클 ─────────────────────────────────────────────
 
 
@@ -161,6 +220,14 @@ async def lifespan(app: FastAPI):
     await _ensure_operator_schema()
     # startup: vuln_services 테이블에 score/difficulty 컬럼 보강 (문제 카탈로그 입력용)
     await _ensure_vuln_service_schema()
+    # startup: 다중 플래그 슬롯/HMAC 메타데이터 컬럼 보강
+    await _ensure_flag_schema()
+    # startup: 팀 변경 작업 직렬화 인덱스 보강
+    await _ensure_team_mutation_schema()
+    # startup: 팀원 VPN 계정 메타데이터 보강
+    await _ensure_team_member_vpn_schema()
+    # startup: 예약 배포용 scheduled_for 컬럼 보강
+    await _ensure_deploy_pipeline_schema()
     # startup: 초기 admin 계정 생성
     await _ensure_admin_account()
     # startup: Discord 봇 설정 8키를 .env → competition_config 로 초기 seed
@@ -168,6 +235,7 @@ async def lifespan(app: FastAPI):
 
     # Phase 11: Redis 이벤트 리스너 시작
     listener_task = asyncio.create_task(_deploy_event_listener())
+    scheduled_deploy_task = asyncio.create_task(_scheduled_deploy_runner())
 
     yield
 
@@ -175,6 +243,11 @@ async def lifespan(app: FastAPI):
     listener_task.cancel()
     try:
         await listener_task
+    except asyncio.CancelledError:
+        pass
+    scheduled_deploy_task.cancel()
+    try:
+        await scheduled_deploy_task
     except asyncio.CancelledError:
         pass
 
@@ -316,5 +389,171 @@ async def _ensure_vuln_service_schema():
         await db.execute(text(
             "ALTER TABLE cstrike.vuln_services "
             "ADD COLUMN IF NOT EXISTS difficulty VARCHAR(20) NOT NULL DEFAULT 'Easy'"
+        ))
+        await db.execute(text(
+            "ALTER TABLE cstrike.vuln_services "
+            "ADD COLUMN IF NOT EXISTS flag_slots JSON"
+        ))
+        await db.execute(text(
+            "ALTER TABLE cstrike.vuln_services "
+            "ADD COLUMN IF NOT EXISTS healthcheck_scenarios JSON"
+        ))
+        await db.execute(text(
+            "ALTER TABLE cstrike.vuln_services "
+            "ADD COLUMN IF NOT EXISTS connection_info TEXT"
+        ))
+        await db.execute(text(
+            """
+            UPDATE cstrike.vuln_services
+            SET flag_slots = json_build_array(
+                json_build_object(
+                    'slot_key', 'flag-1',
+                    'label', '플래그 1',
+                    'filename', 'flag.txt',
+                    'points', score,
+                    'difficulty', COALESCE(difficulty, 'Easy')
+                )
+            )
+            WHERE flag_slots IS NULL
+            """
+        ))
+        await db.commit()
+
+
+async def _ensure_flag_schema():
+    """다중 플래그 슬롯/HMAC 메타데이터 컬럼과 제약을 보강한다."""
+    async with async_session() as db:
+        await db.execute(text(
+            "ALTER TABLE cstrike.flags "
+            "ADD COLUMN IF NOT EXISTS slot_key VARCHAR(64) NOT NULL DEFAULT 'primary'"
+        ))
+        await db.execute(text(
+            "ALTER TABLE cstrike.flags "
+            "ADD COLUMN IF NOT EXISTS slot_label VARCHAR(100) NOT NULL DEFAULT '기본 플래그'"
+        ))
+        await db.execute(text(
+            "ALTER TABLE cstrike.flags "
+            "ADD COLUMN IF NOT EXISTS flag_filename VARCHAR(255) NOT NULL DEFAULT 'flag.txt'"
+        ))
+        await db.execute(text(
+            "ALTER TABLE cstrike.flags "
+            "ADD COLUMN IF NOT EXISTS point_value INTEGER NOT NULL DEFAULT 100"
+        ))
+        await db.execute(text(
+            "ALTER TABLE cstrike.flags "
+            "ALTER COLUMN flag_value TYPE VARCHAR(255)"
+        ))
+        await db.execute(text(
+            """
+            UPDATE cstrike.flags f
+            SET slot_key = COALESCE(NULLIF(f.slot_key, ''), 'primary'),
+                slot_label = COALESCE(NULLIF(f.slot_label, ''), '기본 플래그'),
+                flag_filename = COALESCE(NULLIF(f.flag_filename, ''), 'flag.txt'),
+                point_value = COALESCE(f.point_value, vs.score, 100)
+            FROM cstrike.vuln_services vs
+            WHERE f.service_id = vs.id
+            """
+        ))
+        await db.execute(text(
+            "ALTER TABLE cstrike.flag_submissions "
+            "ADD COLUMN IF NOT EXISTS slot_key VARCHAR(64)"
+        ))
+        await db.execute(text(
+            "ALTER TABLE cstrike.flag_submissions "
+            "ADD COLUMN IF NOT EXISTS slot_label VARCHAR(100)"
+        ))
+        await db.execute(text(
+            "ALTER TABLE cstrike.flag_submissions "
+            "ADD COLUMN IF NOT EXISTS points_awarded INTEGER"
+        ))
+        await db.execute(text(
+            "ALTER TABLE cstrike.flag_submissions "
+            "ALTER COLUMN submitted_flag TYPE VARCHAR(255)"
+        ))
+        await db.execute(text(
+            """
+            UPDATE cstrike.flag_submissions fs
+            SET slot_key = COALESCE(fs.slot_key, f.slot_key),
+                slot_label = COALESCE(fs.slot_label, f.slot_label),
+                points_awarded = COALESCE(fs.points_awarded, f.point_value)
+            FROM cstrike.flags f
+            WHERE fs.flag_id = f.id
+            """
+        ))
+        await db.execute(text(
+            """
+            DO $$
+            BEGIN
+                IF EXISTS (
+                    SELECT 1
+                    FROM pg_constraint
+                    WHERE conname = 'uq_flags_round_team_service'
+                      AND connamespace = 'cstrike'::regnamespace
+                ) THEN
+                    ALTER TABLE cstrike.flags DROP CONSTRAINT uq_flags_round_team_service;
+                END IF;
+                IF NOT EXISTS (
+                    SELECT 1
+                    FROM pg_constraint
+                    WHERE conname = 'uq_flags_round_team_service_slot'
+                      AND connamespace = 'cstrike'::regnamespace
+                ) THEN
+                    ALTER TABLE cstrike.flags
+                    ADD CONSTRAINT uq_flags_round_team_service_slot
+                    UNIQUE (round_id, team_id, service_id, slot_key);
+                END IF;
+            END $$;
+            """
+        ))
+        await db.commit()
+
+
+async def _ensure_team_mutation_schema():
+    """팀 변경 작업 직렬화용 partial unique index를 보강한다."""
+    async with async_session() as db:
+        await db.execute(text(
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_team_mutations_running_resource_key "
+            "ON cstrike.team_mutations (resource_key) "
+            "WHERE status = 'running'"
+        ))
+        await db.execute(text(
+            "CREATE INDEX IF NOT EXISTS ix_team_mutations_team_id "
+            "ON cstrike.team_mutations (team_id)"
+        ))
+        await db.execute(text(
+            "CREATE INDEX IF NOT EXISTS ix_team_mutations_started_at "
+            "ON cstrike.team_mutations (started_at DESC)"
+        ))
+        await db.commit()
+
+
+async def _ensure_team_member_vpn_schema():
+    """기존 team_members 테이블에 팀원 VPN 메타데이터 컬럼을 보강한다."""
+    async with async_session() as db:
+        await db.execute(text(
+            "ALTER TABLE cstrike.team_members "
+            "ADD COLUMN IF NOT EXISTS vpn_username VARCHAR(128)"
+        ))
+        await db.execute(text(
+            "ALTER TABLE cstrike.team_members "
+            "ADD COLUMN IF NOT EXISTS vpn_ip VARCHAR(64)"
+        ))
+        await db.execute(text(
+            "ALTER TABLE cstrike.team_members "
+            "ADD COLUMN IF NOT EXISTS vpn_password TEXT"
+        ))
+        await db.execute(text(
+            "ALTER TABLE cstrike.team_members "
+            "ADD COLUMN IF NOT EXISTS vpn_password_updated_at TIMESTAMPTZ"
+        ))
+        await db.commit()
+
+
+async def _ensure_deploy_pipeline_schema():
+    """기존 deploy_pipelines 테이블에 예약 배포용 컬럼을 보강한다."""
+    async with async_session() as db:
+        await db.execute(text(
+            "ALTER TABLE cstrike.deploy_pipelines "
+            "ADD COLUMN IF NOT EXISTS scheduled_for TIMESTAMPTZ"
         ))
         await db.commit()

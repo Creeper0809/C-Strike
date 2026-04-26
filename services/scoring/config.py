@@ -29,6 +29,7 @@ class ScoringSettings(BaseSettings):
     FLAG_PLANT_RETRY_COUNT: int = 1
     FLAG_PLANT_RETRY_DELAY_SECONDS: int = 2
     MAX_CONCURRENT_SSH: int = 20
+    FLAG_HMAC_SECRET: str = "cstrike-flag-hmac-change-me"
 
     # ── SSH 설정 ──
     SSH_KEY_PATH: str = "/app/keys/scoring_key"

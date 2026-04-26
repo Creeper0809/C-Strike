@@ -3,36 +3,50 @@
 from datetime import datetime
 from uuid import UUID
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+
+
+class FlagSlotConfig(BaseModel):
+    slot_key: str | None = None
+    label: str
+    filename: str
+    points: int
+    difficulty: str = "Easy"
 
 
 class ServiceCreate(BaseModel):
     name: str
     description: str | None = None
+    connection_info: str | None = None
     category: str  # web/pwnable/crypto/network/misc
     competition_id: UUID | None = None
     docker_image: str | None = None
     docker_compose_config: dict | None = None
-    env_type: str = "image"  # "dockerfile" | "image"
+    env_type: str = "image"  # "dockerfile" | "image" | "connection_info"
     container_port: int | None = None
     exposed_ports: dict | list | None = None
     flag_format: str = "FLAG{...}"
+    flag_slots: list[FlagSlotConfig] | None = None
     health_check_endpoint: str | None = None
-    score: int = 100
+    healthcheck_scenarios: dict | None = None
     difficulty: str = "Easy"  # Easy / Medium / Hard
 
 
 class ServiceUpdate(BaseModel):
     name: str | None = None
     description: str | None = None
+    connection_info: str | None = None
     category: str | None = None
     competition_id: UUID | None = None
+    env_type: str | None = None
     docker_image: str | None = None
+    container_port: int | None = None
     docker_compose_config: dict | None = None
     exposed_ports: dict | list | None = None
     flag_format: str | None = None
+    flag_slots: list[FlagSlotConfig] | None = None
     health_check_endpoint: str | None = None
-    score: int | None = None
+    healthcheck_scenarios: dict | None = None
     difficulty: str | None = None
 
 
@@ -40,6 +54,7 @@ class ServiceResponse(BaseModel):
     id: UUID
     name: str
     description: str | None = None
+    connection_info: str | None = None
     category: str
     competition_id: UUID | None = None
     competition_name: str | None = None
@@ -47,7 +62,9 @@ class ServiceResponse(BaseModel):
     docker_compose_config: dict | None = None
     exposed_ports: dict | list | None = None
     flag_format: str | None = None
+    flag_slots: list[FlagSlotConfig] = Field(default_factory=list)
     health_check_endpoint: str | None = None
+    healthcheck_scenarios: dict | None = None
     env_type: str = "image"
     container_port: int | None = None
     build_status: str | None = None

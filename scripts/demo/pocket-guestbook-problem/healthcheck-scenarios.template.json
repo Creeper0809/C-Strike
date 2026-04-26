@@ -1,0 +1,80 @@
+{
+  "version": 1,
+  "steps": [
+    {
+      "name": "메인 페이지 확인",
+      "request": {
+        "method": "GET",
+        "path": "/"
+      },
+      "expect": {
+        "status": 200,
+        "body_contains": [
+          "Pocket Guestbook",
+          "Team Info",
+          "Flags"
+        ]
+      }
+    },
+    {
+      "name": "팀 정보 API 확인",
+      "request": {
+        "method": "GET",
+        "path": "/api/team-info"
+      },
+      "expect": {
+        "status": 200,
+        "json_keys": [
+          "team_name",
+          "team_code"
+        ]
+      }
+    },
+    {
+      "name": "메시지 등록",
+      "request": {
+        "method": "POST",
+        "path": "/api/messages",
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "json_body": {
+          "author": "checker",
+          "content": "healthcheck-message"
+        }
+      },
+      "expect": {
+        "status": 201,
+        "body_contains": [
+          "healthcheck-message"
+        ]
+      }
+    },
+    {
+      "name": "메시지 조회",
+      "request": {
+        "method": "GET",
+        "path": "/api/messages"
+      },
+      "expect": {
+        "status": 200,
+        "body_contains": [
+          "healthcheck-message"
+        ]
+      }
+    },
+    {
+      "name": "플래그 목록 확인",
+      "request": {
+        "method": "GET",
+        "path": "/api/flags"
+      },
+      "expect": {
+        "status": 200,
+        "body_contains": [
+          "flag"
+        ]
+      }
+    }
+  ]
+}

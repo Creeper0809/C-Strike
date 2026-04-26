@@ -22,6 +22,14 @@ from app.schemas.service import (
     ServiceResponse,
 )
 from app.utils.audit import record_audit
+from app.utils.flag_slots import (
+    DEFAULT_FLAG_FORMAT,
+    build_default_flag_slots,
+    calculate_total_flag_points,
+    derive_service_difficulty,
+    normalize_flag_slots,
+)
+from app.utils.healthcheck_scenarios import normalize_healthcheck_scenarios
 
 
 # ── Dockerfile HEALTHCHECK 파서 (Task 2) ─────────────────────
@@ -141,6 +149,14 @@ def _to_response(
 ) -> ServiceResponse:
     """VulnService ORM 객체를 ServiceResponse로 변환한다."""
     resp = ServiceResponse.model_validate(service)
+    resp.flag_slots = normalize_flag_slots(
+        service.flag_slots,
+        fallback_score=service.score or 100,
+        fallback_difficulty=service.difficulty or "Easy",
+    )
+    resp.healthcheck_scenarios = normalize_healthcheck_scenarios(service.healthcheck_scenarios)
+    resp.score = calculate_total_flag_points(resp.flag_slots)
+    resp.difficulty = derive_service_difficulty(resp.flag_slots, service.difficulty or "Easy")
     if name_map:
         resp.registered_by_name = name_map.get(service.registered_by)
         if service.approved_by:
@@ -213,8 +229,10 @@ async def create_service(
     """새 취약 서비스를 등록한다. 초기 상태는 draft."""
     if body.env_type == "image" and not body.docker_image:
         raise HTTPException(400, "Docker 이미지 모드에서는 docker_image가 필수입니다")
-    if body.env_type not in ("image", "dockerfile"):
-        raise HTTPException(400, "env_type은 'image' 또는 'dockerfile'만 허용됩니다")
+    if body.env_type == "connection_info" and not (body.connection_info or "").strip():
+        raise HTTPException(400, "접속 정보 모드에서는 connection_info가 필수입니다")
+    if body.env_type not in ("image", "dockerfile", "connection_info"):
+        raise HTTPException(400, "env_type은 'image', 'dockerfile', 'connection_info'만 허용됩니다")
 
     # 대회 존재 여부 사전 검증 — FK 위반 500 방지
     if body.competition_id is not None:
@@ -232,26 +250,42 @@ async def create_service(
     auto_image = (
         f"cstrike-vuln-{new_id}:latest"
         if body.env_type == "dockerfile"
-        else body.docker_image
+        else body.docker_image if body.env_type == "image" else None
     )
+
+    try:
+        normalized_slots = normalize_flag_slots(
+            body.flag_slots,
+            fallback_score=100,
+            fallback_difficulty=body.difficulty or "Easy",
+        )
+        normalized_healthcheck_scenarios = normalize_healthcheck_scenarios(body.healthcheck_scenarios)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
 
     service = VulnService(
         id=new_id,
         name=body.name,
         description=body.description,
+        connection_info=body.connection_info,
         category=body.category,
         competition_id=body.competition_id,
         docker_image=auto_image,
         docker_compose_config=body.docker_compose_config,
         exposed_ports=body.exposed_ports,
-        flag_format=body.flag_format,
+        flag_format=body.flag_format or DEFAULT_FLAG_FORMAT,
+        flag_slots=normalized_slots,
         health_check_endpoint=body.health_check_endpoint,
+        healthcheck_scenarios=normalized_healthcheck_scenarios,
         env_type=body.env_type,
-        container_port=body.container_port,
+        container_port=body.container_port if body.env_type != "connection_info" else None,
         status="draft",
         registered_by=current_operator.id,
-        score=body.score,
-        difficulty=body.difficulty,
+        score=calculate_total_flag_points(normalized_slots),
+        difficulty=derive_service_difficulty(normalized_slots, body.difficulty or "Easy"),
     )
     db.add(service)
     await db.flush()
@@ -295,8 +329,10 @@ async def update_service(
     """서비스를 수정한다.
 
     draft 상태: 모든 필드 수정 가능.
-    active 상태: competition_id(대회 연결/변경)만 수정 허용. 운영 중 서비스의 이름이나
-        이미지 등은 빌드 재실행이 필요하므로 draft 경유를 강제한다.
+    active 상태: competition_id / flag_slots / health_check_endpoint / healthcheck_scenarios /
+        connection_info
+        같은 운영 메타만 수정 허용. 이름이나 이미지 등은 빌드 재실행이 필요하므로
+        draft 경유를 강제한다.
     """
     service = await _get_service_or_404(db, service_id)
 
@@ -308,13 +344,42 @@ async def update_service(
         )
 
     if service.status != "draft":
-        # competition_id / score / difficulty 는 빌드와 무관한 메타라 active 상태에서도 허용.
-        non_meta_fields = set(update_data.keys()) - {"competition_id", "score", "difficulty"}
+        # competition_id / flag_slots / healthcheck_* 는 빌드와 무관한 메타라 active 상태에서도 허용.
+        non_meta_fields = set(update_data.keys()) - {
+            "competition_id",
+            "flag_slots",
+            "health_check_endpoint",
+            "healthcheck_scenarios",
+            "connection_info",
+        }
         if non_meta_fields:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="draft 상태가 아닌 서비스는 대회·점수·난이도만 수정할 수 있습니다.",
+                detail="draft 상태가 아닌 서비스는 대회·플래그 슬롯·헬스체크 설정만 수정할 수 있습니다.",
             )
+
+    effective_env_type = update_data.get("env_type", service.env_type)
+    effective_docker_image = update_data.get("docker_image", service.docker_image)
+    effective_connection_info = update_data.get("connection_info", service.connection_info)
+
+    if effective_env_type not in ("image", "dockerfile", "connection_info"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="env_type은 'image', 'dockerfile', 'connection_info'만 허용됩니다",
+        )
+    if effective_env_type == "image" and not effective_docker_image:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Docker 이미지 모드에서는 docker_image가 필수입니다.",
+        )
+    if effective_env_type == "connection_info" and not str(effective_connection_info or "").strip():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="접속 정보 모드에서는 connection_info가 필수입니다.",
+        )
+    if effective_env_type == "connection_info":
+        update_data["docker_image"] = None
+        update_data["container_port"] = None
 
     # 대회 존재 여부 사전 검증 — FK 위반 500 방지
     if "competition_id" in update_data and update_data["competition_id"] is not None:
@@ -326,6 +391,37 @@ async def update_service(
                 detail="해당 대회가 존재하지 않습니다.",
             )
 
+    if "flag_slots" in update_data:
+        try:
+            normalized_slots = normalize_flag_slots(
+                update_data["flag_slots"],
+                fallback_score=service.score,
+                fallback_difficulty=service.difficulty or "Easy",
+            )
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=str(exc),
+            ) from exc
+        update_data["flag_slots"] = normalized_slots
+        update_data["score"] = calculate_total_flag_points(normalized_slots)
+        update_data["difficulty"] = derive_service_difficulty(normalized_slots, service.difficulty or "Easy")
+        update_data["flag_format"] = DEFAULT_FLAG_FORMAT
+
+    if "healthcheck_scenarios" in update_data:
+        try:
+            update_data["healthcheck_scenarios"] = normalize_healthcheck_scenarios(
+                update_data["healthcheck_scenarios"]
+            )
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=str(exc),
+            ) from exc
+
+    if "flag_format" in update_data and not update_data["flag_format"]:
+        update_data["flag_format"] = DEFAULT_FLAG_FORMAT
+
     await db.execute(
         update(VulnService)
         .where(VulnService.id == service_id)
@@ -335,7 +431,7 @@ async def update_service(
     # score/difficulty 변경 시 cstrike.problem 카탈로그도 동기화.
     # release된 팩들의 problem_no를 찾아 값만 갱신한다. 운영자가 서비스 편집으로
     # 점수를 바꾸면 /문제목록에 즉시 반영되도록 한다.
-    if "score" in update_data or "difficulty" in update_data:
+    if "score" in update_data or "difficulty" in update_data or "flag_slots" in update_data:
         await db.flush()
         await db.refresh(service)
         from app.api.vulnpacks import _CATEGORY_SHORT
@@ -410,6 +506,7 @@ async def delete_service(
     """
     from sqlalchemy import delete as sql_delete, update as sql_update
 
+    from app.models.deploy import DeployPipeline, DeployStage
     from app.models.flag import Flag, FlagSubmission
     from app.models.sla_check import SlaCheck
     from app.models.team_service import TeamService
@@ -421,6 +518,20 @@ async def delete_service(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"현재 상태({service.status})에서는 삭제할 수 없습니다. (draft 또는 active 상태만 가능)",
+        )
+
+    running_pipeline_exists = await db.scalar(
+        select(func.count())
+        .select_from(DeployPipeline)
+        .where(
+            DeployPipeline.service_id == service.id,
+            DeployPipeline.status == "running",
+        )
+    )
+    if running_pipeline_exists:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="이 서비스의 배포 파이프라인이 아직 실행 중입니다. 배포 완료 또는 실패 후 다시 삭제해 주세요.",
         )
 
     teardown_summary: dict | None = None
@@ -439,8 +550,26 @@ async def delete_service(
         except Exception as e:
             teardown_summary = {"error": str(e)}
 
+    pipeline_ids_subquery = (
+        select(DeployPipeline.id)
+        .where(DeployPipeline.service_id == service.id)
+    )
+
     # FK 제약이 RESTRICT인 자식 레코드를 먼저 정리.
-    # 순서: sla_checks → flags → team_services (sla_checks가 team_services도 참조)
+    # 순서:
+    #   1) deploy_stages / deploy_pipelines
+    #   2) sla_checks → flags → team_services (sla_checks가 team_services도 참조)
+    await db.execute(
+        sql_update(DeployPipeline)
+        .where(DeployPipeline.rollback_of.in_(pipeline_ids_subquery))
+        .values(rollback_of=None)
+    )
+    await db.execute(
+        sql_delete(DeployStage).where(DeployStage.pipeline_id.in_(pipeline_ids_subquery))
+    )
+    await db.execute(
+        sql_delete(DeployPipeline).where(DeployPipeline.service_id == service.id)
+    )
     await db.execute(sql_delete(SlaCheck).where(SlaCheck.service_id == service_id))
     await db.execute(sql_delete(Flag).where(Flag.service_id == service_id))
     await db.execute(sql_delete(TeamService).where(TeamService.service_id == service_id))
@@ -571,7 +700,8 @@ MAX_ARCHIVE_FILE_COUNT = 1000              # zip bomb 방지: 최대 파일 수
 @router.post("/{service_id}/build-archive")
 async def upload_build_archive(
     service_id: str,
-    file: UploadFile = File(...),
+    file: UploadFile | None = File(None),
+    archive: UploadFile | None = File(None),
     replace: bool = Query(True, description="True이면 기존 빌드 파일을 삭제 후 교체"),
     request: Request = None,
     db: AsyncSession = Depends(get_db),
@@ -590,13 +720,17 @@ async def upload_build_archive(
     if service.env_type != "dockerfile":
         raise HTTPException(400, "Dockerfile 모드 서비스만 빌드 파일을 업로드할 수 있습니다")
 
+    upload = file or archive
+    if upload is None:
+        raise HTTPException(422, "ZIP 업로드 파일이 필요합니다")
+
     # --- ZIP 확장자 검증 ---
-    archive_name = file.filename or "unknown.zip"
+    archive_name = upload.filename or "unknown.zip"
     if not archive_name.lower().endswith(".zip"):
         raise HTTPException(400, ".zip 파일만 업로드할 수 있습니다")
 
     # --- ZIP 파일 읽기 & 크기 검증 ---
-    archive_bytes = await file.read()
+    archive_bytes = await upload.read()
     if len(archive_bytes) > MAX_ARCHIVE_SIZE:
         raise HTTPException(
             400,
@@ -936,6 +1070,28 @@ async def activate_service(
     테스트 컨테이너 헬스체크가 성공해야만 active로 전환한다.
     """
     service = await _get_service_or_404(db, service_id)
+
+    if service.env_type == "connection_info":
+        if not (service.connection_info or "").strip():
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="접속 정보가 비어 있어 활성화할 수 없습니다.",
+            )
+        service.status = "active"
+        await db.commit()
+        await record_audit(
+            db, current_operator, "ops.service.activate",
+            "service", service.id,
+            {"service_id": service_id, "mode": "connection_info"},
+            request.client.host if request.client else None,
+        )
+        await db.refresh(service)
+
+        op_ids = {service.registered_by}
+        if service.approved_by:
+            op_ids.add(service.approved_by)
+        name_map = await _resolve_operator_names(db, op_ids)
+        return _to_response(service, name_map)
 
     if service.env_type != "image":
         raise HTTPException(

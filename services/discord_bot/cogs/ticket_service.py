@@ -3,14 +3,16 @@ import logging
 import re
 from collections import defaultdict
 
+import aiohttp
 import discord
 
 if "." in (__package__ or ""):
     from .. import config, db
-    from . import ticket_log
+    from . import role_policy, ticket_log
 else:
     import config
     import db
+    import cogs.role_policy as role_policy
     import cogs.ticket_log as ticket_log
 
 PANEL_MARKER = "[OPS_TICKET_PANEL_V1]"
@@ -75,6 +77,94 @@ def _safe_requester_name(user: discord.abc.User) -> str:
 def _category_label(category: str) -> str:
     key = _clean_text(category, fallback="기타").lower()
     return _CATEGORY_LABELS.get(key, key)
+
+
+def _operator_members_for_ticket_thread(guild: discord.Guild) -> list[discord.Member]:
+    operator_ids: set[int] = set()
+    members: list[discord.Member] = []
+
+    operator_role = role_policy.operator_role(guild)
+    if operator_role is not None:
+        for member in operator_role.members:
+            if member.bot:
+                continue
+            if member.id in operator_ids:
+                continue
+            operator_ids.add(member.id)
+            members.append(member)
+
+    for member in guild.members:
+        if member.bot:
+            continue
+        if member.id in operator_ids:
+            continue
+        if not role_policy.is_operator(member):
+            continue
+        operator_ids.add(member.id)
+        members.append(member)
+
+    return members
+
+
+async def _invite_operator_members_to_thread(
+    *,
+    guild: discord.Guild,
+    thread: discord.Thread,
+    requester: discord.abc.User,
+) -> tuple[int, list[int]]:
+    invited_count = 0
+    invited_member_ids: list[int] = []
+
+    for member in _operator_members_for_ticket_thread(guild):
+        if member.id == requester.id:
+            continue
+        try:
+            await thread.add_user(member)
+            invited_count += 1
+            invited_member_ids.append(member.id)
+        except discord.HTTPException:
+            LOGGER.exception(
+                "Failed to invite operator to ticket thread thread_id=%s operator_id=%s",
+                thread.id,
+                member.id,
+            )
+
+    LOGGER.info(
+        "Invited %s operator(s) to ticket thread thread_id=%s operator_ids=%s",
+        invited_count,
+        thread.id,
+        invited_member_ids,
+    )
+    return invited_count, invited_member_ids
+
+
+async def _sync_thread_message_to_ops(
+    *,
+    ticket_number: str,
+    author_name: str,
+    content: str,
+) -> bool:
+    payload = {
+        "ticket_number": ticket_number,
+        "author_name": _clean_text(author_name, fallback="Discord 사용자"),
+        "content": content,
+    }
+    timeout = aiohttp.ClientTimeout(total=5)
+    try:
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.post(config.TICKET_WEBHOOK_URL, json=payload) as resp:
+                if 200 <= resp.status < 300:
+                    return True
+                body = await resp.text()
+                LOGGER.warning(
+                    "Ticket webhook sync failed status=%s ticket=%s body=%s",
+                    resp.status,
+                    ticket_number,
+                    body[:500],
+                )
+    except Exception:
+        LOGGER.exception("Ticket webhook sync raised ticket=%s", ticket_number)
+    return False
 
 
 async def _send_ephemeral_safe(interaction: discord.Interaction, message: str) -> None:
@@ -153,6 +243,11 @@ async def start_ticket_open_flow(interaction: discord.Interaction) -> None:
             type=discord.ChannelType.private_thread,
         )
         await thread.add_user(interaction.user)
+        invited_operator_count, invited_operator_ids = await _invite_operator_members_to_thread(
+            guild=guild,
+            thread=thread,
+            requester=interaction.user,
+        )
 
         ticket_id, ticket_number = _new_ticket_identity(DEFAULT_TICKET_CATEGORY)
         try:
@@ -193,7 +288,11 @@ async def start_ticket_open_flow(interaction: discord.Interaction) -> None:
         interaction.user,
         "TICKET_THREAD_CREATED",
         ticket_id,
-        f"thread_id={thread.id}",
+        (
+            f"thread_id={thread.id} "
+            f"operators_invited={invited_operator_count} "
+            f"operator_ids={','.join(str(member_id) for member_id in invited_operator_ids)}"
+        ),
     )
 
 
@@ -464,6 +563,24 @@ async def notify_ticket_thread_message(
     guild = message.guild
     if guild is None:
         return
+    content = (message.content or "").strip()
+    if not content and message.attachments:
+        content = "\n".join(
+            f"[첨부] {attachment.filename}"
+            for attachment in message.attachments
+            if attachment.filename
+        )
+    if not content:
+        return
+
+    ticket_number = str(ticket.get("ticket_number") or "").strip()
+    if ticket_number:
+        await _sync_thread_message_to_ops(
+            ticket_number=ticket_number,
+            author_name=getattr(message.author, "display_name", message.author.name),
+            content=content,
+        )
+
     notifier = await _get_notifier_user(guild, client)
     if notifier is None:
         return
@@ -473,7 +590,7 @@ async def notify_ticket_thread_message(
         "해당 티켓 스레드에 새 메시지가 올라왔습니다.\n"
         f"채널: <#{thread.id}>\n"
         f"작성자: {message.author.display_name}\n"
-        f"내용: {message.content[:500] if message.content else '(텍스트 없음)'}"
+        f"내용: {content[:500]}"
     )
     try:
         await notifier.send(text)
@@ -633,4 +750,3 @@ def close_open_tickets_for_thread(thread_id: int | str, status: str = "closed") 
             status,
         )
     return closed_count
-

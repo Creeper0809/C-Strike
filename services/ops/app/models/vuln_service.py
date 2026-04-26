@@ -16,12 +16,15 @@ class VulnService(Base):
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid4)
     name = Column(String(100), nullable=False)
     description = Column(Text)
+    connection_info = Column(Text)
     category = Column(String(50), nullable=False)  # web/pwnable/crypto/network/misc
     docker_image = Column(String(500), nullable=True)
     docker_compose_config = Column(JSON)
     exposed_ports = Column(JSON)
     flag_format = Column(String(100), default="FLAG{...}")
+    flag_slots = Column(JSON, nullable=False, default=list)
     health_check_endpoint = Column(String(200))
+    healthcheck_scenarios = Column(JSON)
     status = Column(
         String(20), nullable=False, default="draft"
     )  # draft/pending/approved/rejected/active/disabled

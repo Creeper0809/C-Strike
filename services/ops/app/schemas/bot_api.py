@@ -91,6 +91,26 @@ class BotTeamInfoResponse(BaseModel):
     members: list[BotTeamMemberInfo]
 
 
+class BotTeamRoleLinkRequest(BaseModel):
+    """POST /api/v1/bot/teams/{id}/role-link 요청 바디."""
+
+    guild_id: str = Field(..., max_length=50)
+    discord_role_id: str = Field(..., max_length=50)
+    discord_role_name: str | None = Field(default=None, max_length=100)
+    requested_by_id: str | None = Field(default=None, max_length=50)
+    requested_by_name: str | None = Field(default=None, max_length=100)
+
+
+class BotTeamRoleLinkResponse(BaseModel):
+    """POST /api/v1/bot/teams/{id}/role-link 응답."""
+
+    team_id: UUID
+    team_name: str
+    team_code: str
+    discord_role_id: str
+    message: str
+
+
 class BotMyTeamResponse(BaseModel):
     """GET /api/v1/bot/teams/my 응답 — discord_user_id로 소속 팀 조회."""
     team_id: UUID

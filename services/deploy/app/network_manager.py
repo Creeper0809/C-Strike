@@ -1,4 +1,6 @@
 """Docker 네트워크 관리 — 팀별 격리 네트워크 생성/삭제/조회"""
+import re
+
 import docker
 
 
@@ -6,8 +8,13 @@ def _get_docker_client() -> docker.DockerClient:
     return docker.from_env()
 
 
+def _safe_team_runtime_slug(team_code: str) -> str:
+    slug = re.sub(r"[^a-z0-9._-]+", "-", (team_code or "").lower()).strip("-")
+    return slug or "team"
+
+
 def _network_name(team_code: str) -> str:
-    return f"cstrike-team-{team_code}"
+    return f"cstrike-team-{_safe_team_runtime_slug(team_code)}"
 
 
 def ensure_team_network(
